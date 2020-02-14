@@ -4,6 +4,14 @@ version = "0.1.0"
 authors = ["ramn <github@rymdimperiet.org>"]
 edition = "2018"
 
+description = "CloudWatch emitter for the metrics crate"
+license = "MIT/Apache-2.0"
+documentation = "https://docs.rs/metrics_cloudwatch"
+homepage = "https://github.com/ramn/metrics_cloudwatch"
+repository = "https://github.com/ramn/metrics_cloudwatch"
+readme = "README.md"
+keywords = ["metrics", "cloudwatch", "aws"]
+
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
