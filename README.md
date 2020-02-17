@@ -1,5 +1,7 @@
 metrics_cloudwatch
 ==================
+[![crates.io](http://meritbadge.herokuapp.com/metrics_cloudwatch)](https://crates.io/crates/metrics_cloudwatch)
+[![Docs](https://docs.rs/metrics_cloudwatch/badge.svg)](http://docs.rs/metrics_cloudwatch)
 
 Purpose
 -------
