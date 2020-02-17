@@ -27,6 +27,7 @@ pub struct Config {
     pub default_dimensions: BTreeMap<String, String>,
     pub storage_resolution: Resolution,
     pub send_interval_secs: u64,
+    pub region: Region,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -95,8 +96,7 @@ fn mk_emitter(
     config: &Config,
 ) -> impl Future<Item = (), Error = ()> {
     let cloudwatch_namespace = config.cloudwatch_namespace.clone();
-    // TODO: make Region configurable
-    let cloudwatch_client = CloudWatchClient::new(Region::UsEast1);
+    let cloudwatch_client = CloudWatchClient::new(config.region.clone());
     emit_receiver.for_each(move |mut metrics| {
         let mut requests = vec![];
         loop {

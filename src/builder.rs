@@ -7,12 +7,15 @@ use crate::{
     error::Error,
 };
 
+pub use rusoto_core::Region;
+
 #[derive(Debug, Default)]
 pub struct Builder {
     cloudwatch_namespace: Option<String>,
     default_dimensions: BTreeMap<String, String>,
     storage_resolution: Option<Resolution>,
     send_interval_secs: Option<u64>,
+    region: Option<Region>,
 }
 
 pub fn builder() -> Builder {
@@ -51,6 +54,14 @@ impl Builder {
         }
     }
 
+    /// Sets the AWS Region to send metrics to
+    pub fn region(self, region: Region) -> Self {
+        Self {
+            region: Some(region),
+            ..self
+        }
+    }
+
     /// Initializes the CloudWatch metrics backend and runs it in a new thread
     pub fn init_thread(self) -> Result<(), Error> {
         collector::init(self.build_config()?);
@@ -68,6 +79,7 @@ impl Builder {
             default_dimensions: self.default_dimensions,
             storage_resolution: self.storage_resolution.unwrap_or(Resolution::Minute),
             send_interval_secs: self.send_interval_secs.unwrap_or(10),
+            region: self.region.unwrap_or(Region::UsEast1),
         })
     }
 }
