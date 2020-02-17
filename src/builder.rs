@@ -1,7 +1,5 @@
 use std::collections::BTreeMap;
 
-use futures::{future, prelude::*};
-
 use crate::{
     collector::{self, Config, Resolution},
     error::Error,
@@ -69,8 +67,8 @@ impl Builder {
     }
 
     /// Initializes the CloudWatch metrics and returns a Future that must be polled
-    pub fn init_future(self) -> impl Future<Item = (), Error = Error> {
-        future::result(self.build_config()).and_then(collector::init_future)
+    pub async fn init_future(self) -> Result<(), Error> {
+        collector::init_future(self.build_config()?).await
     }
 
     fn build_config(self) -> Result<Config, Error> {

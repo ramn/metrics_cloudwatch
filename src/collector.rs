@@ -5,7 +5,7 @@ use std::{
 };
 
 use {
-    futures::{future, prelude::*, sync::mpsc},
+    futures::{channel::mpsc, compat::*, future, prelude::*, stream},
     metrics::{Key, Recorder},
     rusoto_cloudwatch::{
         CloudWatch, CloudWatchClient, Dimension, MetricDatum, PutMetricDataInput, StatisticSet,
@@ -66,74 +66,82 @@ struct Collector {
 
 pub fn init(config: Config) {
     let _ = thread::spawn(|| {
-        tokio::runtime::current_thread::run(init_future(config).map_err(|e| {
-            log::warn!("{}", e);
-        }));
+        let mut runtime = tokio::runtime::Builder::new()
+            // single threaded
+            .basic_scheduler()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            if let Err(e) = init_future(config).await {
+                log::warn!("{}", e);
+            }
+        });
     });
 }
 
-pub fn init_future(config: Config) -> impl Future<Item = (), Error = Error> {
+pub async fn init_future(config: Config) -> Result<(), Error> {
     let (collect_sender, collect_receiver) = mpsc::channel(1024);
     let (emit_sender, emit_receiver) = mpsc::channel(1024);
-
-    let stream = collect_receiver
-        .map(Message::Datum)
-        .select(mk_send_batch_timer(emit_sender, &config));
+    let mut stream = stream::select(
+        collect_receiver.map(Message::Datum),
+        mk_send_batch_timer(emit_sender, &config),
+    );
     let emitter = mk_emitter(emit_receiver, &config);
     let mut collector = Collector::new(config);
-    let process_fut = stream
-        .for_each(move |message| collector.accept(message))
-        .join(emitter)
-        .map(|(_, _)| ());
+    let collection_fut = async {
+        while let Some(msg) = stream.next().await {
+            collector.accept(msg);
+        }
+    };
+    let process_fut = future::join(collection_fut, emitter.map(|_| ()));
     let recorder = Box::new(RecorderHandle(collect_sender));
-    future::result(metrics::set_boxed_recorder(recorder))
-        .map_err(Error::SetRecorder)
-        .and_then(|_| process_fut.map_err(|()| Error::Collector))
+    metrics::set_boxed_recorder(recorder).map_err(Error::SetRecorder)?;
+    process_fut.await;
+    Ok(())
 }
 
 fn mk_emitter(
-    emit_receiver: mpsc::Receiver<MetricsBatch>,
+    mut emit_receiver: mpsc::Receiver<MetricsBatch>,
     config: &Config,
-) -> impl Future<Item = (), Error = ()> {
+) -> impl Future<Output = ()> {
     let cloudwatch_namespace = config.cloudwatch_namespace.clone();
     let cloudwatch_client = CloudWatchClient::new(config.region.clone());
-    emit_receiver.for_each(move |mut metrics| {
-        let mut requests = vec![];
-        loop {
-            let mut batch = metrics.split_off(MAX_CW_METRICS_PER_CALL.min(metrics.len()));
-            mem::swap(&mut batch, &mut metrics);
-            if batch.is_empty() {
-                break;
-            } else {
-                requests.push(
-                    cloudwatch_client
-                        .put_metric_data(PutMetricDataInput {
-                            metric_data: batch,
-                            namespace: cloudwatch_namespace.clone(),
-                        })
-                        .with_timeout(Duration::from_secs(SEND_TIMEOUT_SECS))
-                        .then(|result| {
-                            if let Err(e) = result {
-                                log::warn!("Failed to send metrics: {}", e);
-                            }
-                            Ok(())
-                        }),
-                );
+    async move {
+        while let Some(mut metrics) = emit_receiver.next().await {
+            let mut requests = vec![];
+            loop {
+                let mut batch = metrics.split_off(MAX_CW_METRICS_PER_CALL.min(metrics.len()));
+                mem::swap(&mut batch, &mut metrics);
+                if batch.is_empty() {
+                    break;
+                } else {
+                    requests.push(async {
+                        let result = cloudwatch_client
+                            .put_metric_data(PutMetricDataInput {
+                                metric_data: batch,
+                                namespace: cloudwatch_namespace.clone(),
+                            })
+                            .with_timeout(Duration::from_secs(SEND_TIMEOUT_SECS))
+                            .compat()
+                            .await;
+                        if let Err(e) = result {
+                            log::warn!("Failed to send metrics: {}", e);
+                        }
+                    });
+                }
             }
+            future::join_all(requests).map(|_| ()).await;
         }
-        future::join_all(requests).map(|_| ())
-    })
+    }
 }
 
 fn mk_send_batch_timer(
     emit_sender: mpsc::Sender<MetricsBatch>,
     config: &Config,
-) -> impl Stream<Item = Message, Error = ()> {
+) -> impl Stream<Item = Message> {
     let interval = Duration::from_secs(config.send_interval_secs);
-    let timer = tokio::timer::Interval::new_interval(interval)
-        .map_err(|e| log::warn!("Interval stream failed: {}", e));
-    timer.map(move |tick_ts| Message::SendBatch {
-        tick_ts,
+    tokio::time::interval(interval).map(move |tick_ts| Message::SendBatch {
+        tick_ts: tick_ts.into_std(),
         emit_sender: emit_sender.clone(),
     })
 }
@@ -162,7 +170,7 @@ impl Collector {
         }
     }
 
-    fn accept(&mut self, message: Message) -> Result<(), ()> {
+    fn accept(&mut self, message: Message) {
         let result = match message {
             Message::Datum(datum) => Ok(self.accept_datum(datum)),
             Message::SendBatch {
@@ -173,7 +181,6 @@ impl Collector {
         if let Err(e) = result {
             log::warn!("Failed to accept message: {}", e);
         }
-        Ok(())
     }
 
     fn accept_datum(&mut self, datum: Datum) {
