@@ -1,4 +1,4 @@
-name: test
+name: lint_and_test
 
 on: [push]
 
