@@ -69,6 +69,7 @@ pub fn init(config: Config) {
         let mut runtime = tokio::runtime::Builder::new()
             // single threaded
             .basic_scheduler()
+            .enable_all()
             .build()
             .unwrap();
         runtime.block_on(async {
