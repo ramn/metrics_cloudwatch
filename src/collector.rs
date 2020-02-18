@@ -5,7 +5,7 @@ use std::{
 };
 
 use {
-    futures::{channel::mpsc, compat::*, future, prelude::*, stream},
+    futures::{channel::mpsc, future, prelude::*, stream},
     metrics::{Key, Recorder},
     rusoto_cloudwatch::{
         CloudWatch, CloudWatchClient, Dimension, MetricDatum, PutMetricDataInput, StatisticSet,
@@ -20,7 +20,7 @@ type Timestamp = u64;
 
 const MAX_CW_METRICS_PER_CALL: usize = 20;
 const MAX_CLOUDWATCH_DIMENSIONS: usize = 10;
-const SEND_TIMEOUT_SECS: u64 = 2;
+const SEND_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub struct Config {
     pub cloudwatch_namespace: String,
@@ -113,15 +113,11 @@ async fn mk_emitter(mut emit_receiver: mpsc::Receiver<MetricsBatch>, config: &Co
                 break;
             } else {
                 requests.push(async {
-                    let result = cloudwatch_client
-                        .put_metric_data(PutMetricDataInput {
-                            metric_data: batch,
-                            namespace: config.cloudwatch_namespace.clone(),
-                        })
-                        .with_timeout(Duration::from_secs(SEND_TIMEOUT_SECS))
-                        .compat()
-                        .await;
-                    if let Err(e) = result {
+                    let send_fut = cloudwatch_client.put_metric_data(PutMetricDataInput {
+                        metric_data: batch,
+                        namespace: config.cloudwatch_namespace.clone(),
+                    });
+                    if let Err(e) = tokio::time::timeout(SEND_TIMEOUT, send_fut).await {
                         log::warn!("Failed to send metrics: {}", e);
                     }
                 });
