@@ -61,7 +61,7 @@ struct RecorderHandle(mpsc::Sender<Datum>);
 
 struct Collector {
     metrics_data: BTreeMap<Timestamp, HashMap<(Key, Kind), StatisticSet>>,
-    config: Config,
+    config: &'static Config,
 }
 
 pub fn init(config: Config) {
@@ -80,13 +80,15 @@ pub fn init(config: Config) {
 }
 
 pub async fn init_future(config: Config) -> Result<(), Error> {
+    let config: &'static _ = Box::leak(Box::new(config));
+
     let (collect_sender, collect_receiver) = mpsc::channel(1024);
     let (emit_sender, emit_receiver) = mpsc::channel(1024);
     let mut stream = stream::select(
         collect_receiver.map(Message::Datum),
-        mk_send_batch_timer(emit_sender, &config),
+        mk_send_batch_timer(emit_sender, config),
     );
-    let emitter = mk_emitter(emit_receiver, &config);
+    let emitter = mk_emitter(emit_receiver, config);
     let mut collector = Collector::new(config);
     let collection_fut = async {
         while let Some(msg) = stream.next().await {
@@ -100,38 +102,32 @@ pub async fn init_future(config: Config) -> Result<(), Error> {
     Ok(())
 }
 
-fn mk_emitter(
-    mut emit_receiver: mpsc::Receiver<MetricsBatch>,
-    config: &Config,
-) -> impl Future<Output = ()> {
-    let cloudwatch_namespace = config.cloudwatch_namespace.clone();
+async fn mk_emitter(mut emit_receiver: mpsc::Receiver<MetricsBatch>, config: &Config) {
     let cloudwatch_client = CloudWatchClient::new(config.region.clone());
-    async move {
-        while let Some(mut metrics) = emit_receiver.next().await {
-            let mut requests = vec![];
-            loop {
-                let mut batch = metrics.split_off(MAX_CW_METRICS_PER_CALL.min(metrics.len()));
-                mem::swap(&mut batch, &mut metrics);
-                if batch.is_empty() {
-                    break;
-                } else {
-                    requests.push(async {
-                        let result = cloudwatch_client
-                            .put_metric_data(PutMetricDataInput {
-                                metric_data: batch,
-                                namespace: cloudwatch_namespace.clone(),
-                            })
-                            .with_timeout(Duration::from_secs(SEND_TIMEOUT_SECS))
-                            .compat()
-                            .await;
-                        if let Err(e) = result {
-                            log::warn!("Failed to send metrics: {}", e);
-                        }
-                    });
-                }
+    while let Some(mut metrics) = emit_receiver.next().await {
+        let mut requests = vec![];
+        loop {
+            let mut batch = metrics.split_off(MAX_CW_METRICS_PER_CALL.min(metrics.len()));
+            mem::swap(&mut batch, &mut metrics);
+            if batch.is_empty() {
+                break;
+            } else {
+                requests.push(async {
+                    let result = cloudwatch_client
+                        .put_metric_data(PutMetricDataInput {
+                            metric_data: batch,
+                            namespace: config.cloudwatch_namespace.clone(),
+                        })
+                        .with_timeout(Duration::from_secs(SEND_TIMEOUT_SECS))
+                        .compat()
+                        .await;
+                    if let Err(e) = result {
+                        log::warn!("Failed to send metrics: {}", e);
+                    }
+                });
             }
-            future::join_all(requests).map(|_| ()).await;
         }
+        future::join_all(requests).map(|_| ()).await;
     }
 }
 
@@ -163,7 +159,7 @@ fn time_key(timestamp: Timestamp, resolution: Resolution) -> Timestamp {
 }
 
 impl Collector {
-    fn new(config: Config) -> Self {
+    fn new(config: &'static Config) -> Self {
         Self {
             metrics_data: Default::default(),
             config,
