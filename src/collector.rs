@@ -15,11 +15,13 @@ use {
 
 use crate::error::Error;
 
-type MetricsBatch = Vec<MetricDatum>;
+type Count = usize;
+type HistogramValue = u64;
 type Timestamp = u64;
 
 const MAX_CW_METRICS_PER_CALL: usize = 20;
 const MAX_CLOUDWATCH_DIMENSIONS: usize = 10;
+const MAX_HISTOGRAM_VALUES: usize = 150;
 const SEND_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub struct Config {
@@ -36,19 +38,6 @@ pub enum Resolution {
     Minute,
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, Ord, PartialOrd)]
-enum Kind {
-    Counter,
-    Gauge,
-    Histogram,
-}
-
-struct Datum {
-    key: Key,
-    value: f64,
-    kind: Kind,
-}
-
 enum Message {
     Datum(Datum),
     SendBatch {
@@ -57,12 +46,46 @@ enum Message {
     },
 }
 
-struct RecorderHandle(mpsc::Sender<Datum>);
+enum MetricsBatch {
+    Statistics(Vec<MetricDatum>),
+    Histogram(MetricDatum),
+}
+
+enum Value {
+    Counter(u64),
+    Gauge(i64),
+    Histogram(u64),
+}
+
+#[derive(Clone, Debug, Default)]
+struct Aggregate {
+    counter: StatisticSet,
+    gauge: StatisticSet,
+    histogram: HashMap<HistogramValue, Count>,
+}
 
 struct Collector {
-    metrics_data: BTreeMap<Timestamp, HashMap<(Key, Kind), StatisticSet>>,
+    metrics_data: BTreeMap<Timestamp, HashMap<Key, Aggregate>>,
     config: &'static Config,
 }
+
+struct Datum {
+    key: Key,
+    value: Value,
+}
+
+#[derive(Debug, Default)]
+struct Histogram {
+    counts: Vec<f64>,
+    values: Vec<f64>,
+}
+
+struct HistogramDatum {
+    count: f64,
+    value: f64,
+}
+
+struct RecorderHandle(mpsc::Sender<Datum>);
 
 pub fn init(config: Config) {
     let _ = thread::spawn(|| {
@@ -105,23 +128,29 @@ pub async fn init_future(config: Config) -> Result<(), Error> {
 
 async fn mk_emitter(mut emit_receiver: mpsc::Receiver<MetricsBatch>, config: &Config) {
     let cloudwatch_client = CloudWatchClient::new(config.region.clone());
-    while let Some(mut metrics) = emit_receiver.next().await {
+    let put = |metric_data| async {
+        let send_fut = cloudwatch_client.put_metric_data(PutMetricDataInput {
+            metric_data,
+            namespace: config.cloudwatch_namespace.clone(),
+        });
+        if let Err(e) = tokio::time::timeout(SEND_TIMEOUT, send_fut).await {
+            log::warn!("Failed to send metrics: {}", e);
+        }
+    };
+    while let Some(metrics) = emit_receiver.next().await {
         let mut requests = vec![];
-        loop {
-            let mut batch = metrics.split_off(MAX_CW_METRICS_PER_CALL.min(metrics.len()));
-            mem::swap(&mut batch, &mut metrics);
-            if batch.is_empty() {
-                break;
-            } else {
-                requests.push(async {
-                    let send_fut = cloudwatch_client.put_metric_data(PutMetricDataInput {
-                        metric_data: batch,
-                        namespace: config.cloudwatch_namespace.clone(),
-                    });
-                    if let Err(e) = tokio::time::timeout(SEND_TIMEOUT, send_fut).await {
-                        log::warn!("Failed to send metrics: {}", e);
-                    }
-                });
+        match metrics {
+            MetricsBatch::Statistics(mut metrics) => loop {
+                let mut batch = metrics.split_off(MAX_CW_METRICS_PER_CALL.min(metrics.len()));
+                mem::swap(&mut batch, &mut metrics);
+                if batch.is_empty() {
+                    break;
+                } else {
+                    requests.push(put(batch));
+                }
+            },
+            MetricsBatch::Histogram(histogram) => {
+                requests.push(put(vec![histogram]));
             }
         }
         future::join_all(requests).map(|_| ()).await;
@@ -177,20 +206,45 @@ impl Collector {
     }
 
     fn accept_datum(&mut self, datum: Datum) {
-        let stats_set = self
+        let aggregate = self
             .metrics_data
             .entry(time_key(
                 current_timestamp(),
                 self.config.storage_resolution,
             ))
             .or_insert_with(HashMap::new)
-            .entry((datum.key, datum.kind))
+            .entry(datum.key)
             .or_default();
-        let value = datum.value;
-        stats_set.sample_count += 1.0;
-        stats_set.sum += value;
-        stats_set.maximum = stats_set.maximum.max(value);
-        stats_set.minimum = stats_set.minimum.min(value);
+
+        let apply_stats = |stats_set: &mut StatisticSet, value: f64| {
+            stats_set.sample_count += 1.0;
+            stats_set.sum += value;
+            stats_set.maximum = stats_set.maximum.max(value);
+            stats_set.minimum = stats_set.minimum.min(value);
+        };
+
+        match datum.value {
+            Value::Counter(value) => {
+                apply_stats(&mut aggregate.counter, value as f64);
+            }
+            Value::Gauge(value) => {
+                apply_stats(&mut aggregate.gauge, value as f64);
+            }
+            Value::Histogram(value) => {
+                *aggregate.histogram.entry(value).or_default() += 1;
+            }
+        }
+    }
+
+    fn dimensions(&self, key: &Key) -> Vec<Dimension> {
+        let dimensions_from_keys = key.labels().map(|l| Dimension {
+            name: l.key().to_owned(),
+            value: l.value().to_owned(),
+        });
+        self.default_dimensions()
+            .chain(dimensions_from_keys)
+            .take(MAX_CLOUDWATCH_DIMENSIONS)
+            .collect()
     }
 
     fn accept_send_batch(
@@ -206,22 +260,17 @@ impl Collector {
 
         for (timestamp, stats_by_key) in range {
             let timestamp = timestamp_string(time::UNIX_EPOCH + Duration::from_secs(timestamp));
-            for ((key, kind), stats_set) in stats_by_key {
-                let unit = match kind {
-                    Kind::Counter => Some("Count".into()),
-                    _ => None,
-                };
-                let dimensions_from_keys = key.labels().map(|l| Dimension {
-                    name: l.key().to_owned(),
-                    value: l.value().to_owned(),
-                });
-                let dimensions = self
-                    .default_dimensions()
-                    .chain(dimensions_from_keys)
-                    .take(MAX_CLOUDWATCH_DIMENSIONS)
-                    .collect();
-                let metric_datum = MetricDatum {
-                    dimensions: Some(dimensions),
+
+            for (key, aggregate) in stats_by_key {
+                let Aggregate {
+                    counter,
+                    gauge,
+                    histogram,
+                } = aggregate;
+                let dimensions = self.dimensions(&key);
+
+                let stats_set_datum = &mut |stats_set, unit| MetricDatum {
+                    dimensions: Some(dimensions.clone()),
                     metric_name: key.name().into_owned(),
                     timestamp: Some(timestamp.clone()),
                     storage_resolution: Some(self.config.storage_resolution.as_secs()),
@@ -229,11 +278,52 @@ impl Collector {
                     unit,
                     ..Default::default()
                 };
-                metrics_batch.push(metric_datum);
+
+                if counter.sample_count > 0.0 {
+                    metrics_batch.push(stats_set_datum(counter, Some("Count".to_owned())));
+                }
+                if gauge.sample_count > 0.0 {
+                    metrics_batch.push(stats_set_datum(gauge, None));
+                }
+
+                let histogram_datum = &mut |Histogram { values, counts }, unit| MetricDatum {
+                    dimensions: Some(dimensions.clone()),
+                    metric_name: key.name().into_owned(),
+                    timestamp: Some(timestamp.clone()),
+                    storage_resolution: Some(self.config.storage_resolution.as_secs()),
+                    unit,
+                    values: Some(values),
+                    counts: Some(counts),
+                    ..Default::default()
+                };
+
+                if !histogram.is_empty() {
+                    let histogram_data = &mut histogram.into_iter().map(|(k, v)| HistogramDatum {
+                        value: k as f64,
+                        count: v as f64,
+                    });
+                    loop {
+                        let histogram = histogram_data.take(MAX_HISTOGRAM_VALUES).fold(
+                            Histogram::default(),
+                            |mut memo, datum| {
+                                memo.values.push(datum.value);
+                                memo.counts.push(datum.count);
+                                memo
+                            },
+                        );
+                        if histogram.values.is_empty() {
+                            break;
+                        };
+                        let metrics_batch =
+                            MetricsBatch::Histogram(histogram_datum(histogram, None));
+                        if let Err(e) = emit_sender.try_send(metrics_batch) {
+                            log::debug!("error queueing: {}", e);
+                        }
+                    }
+                }
             }
         }
-
-        Ok(emit_sender.try_send(metrics_batch)?)
+        Ok(emit_sender.try_send(MetricsBatch::Statistics(metrics_batch))?)
     }
 
     fn default_dimensions(&self) -> impl Iterator<Item = Dimension> {
@@ -249,16 +339,14 @@ impl Recorder for RecorderHandle {
     fn increment_counter(&self, key: Key, value: u64) {
         let _ = self.0.clone().try_send(Datum {
             key,
-            value: value as f64,
-            kind: Kind::Counter,
+            value: Value::Counter(value),
         });
     }
 
     fn update_gauge(&self, key: Key, value: i64) {
         let _ = self.0.clone().try_send(Datum {
             key,
-            value: value as f64,
-            kind: Kind::Gauge,
+            value: Value::Gauge(value),
         });
     }
 
@@ -266,8 +354,7 @@ impl Recorder for RecorderHandle {
     fn record_histogram(&self, key: Key, value: u64) {
         let _ = self.0.clone().try_send(Datum {
             key,
-            value: value as f64,
-            kind: Kind::Histogram,
+            value: Value::Histogram(value),
         });
     }
 }
