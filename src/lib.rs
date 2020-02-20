@@ -1,9 +1,18 @@
 #![warn(rust_2018_idioms)]
 #![forbid(unsafe_code)]
 
-pub use builder::{builder, Builder};
-pub use error::Error;
+pub use {rusoto_cloudwatch::CloudWatch, rusoto_core::Region};
+
+pub use {
+    builder::{builder, Builder},
+    collector::Resolution,
+    error::Error,
+};
+
+use std::{future::Future, pin::Pin};
 
 mod builder;
 mod collector;
 mod error;
+
+pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + Sync + 'a>>;

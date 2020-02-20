@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, HashMap},
     mem, thread,
-    time::{self, Duration, Instant, SystemTime},
+    time::{self, Duration, SystemTime},
 };
 
 use {
@@ -9,11 +9,12 @@ use {
     metrics::{Key, Recorder},
     rusoto_cloudwatch::{CloudWatch, Dimension, MetricDatum, PutMetricDataInput, StatisticSet},
     rusoto_core::Region,
+    stream_cancel::StreamExt as _,
 };
 
-use crate::error::Error;
+use crate::{error::Error, BoxFuture};
 
-pub type ClientBuilder = Box<dyn Fn(Region) -> Box<dyn CloudWatch> + Send>;
+pub type ClientBuilder = Box<dyn Fn(Region) -> Box<dyn CloudWatch + Send + Sync> + Send + Sync>;
 type Count = usize;
 type HistogramValue = u64;
 type Timestamp = u64;
@@ -30,6 +31,7 @@ pub struct Config {
     pub send_interval_secs: u64,
     pub region: Region,
     pub client_builder: ClientBuilder,
+    pub shutdown_signal: future::Shared<BoxFuture<'static, ()>>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -41,16 +43,18 @@ pub enum Resolution {
 enum Message {
     Datum(Datum),
     SendBatch {
-        tick_ts: Instant,
+        send_all_before: Timestamp,
         emit_sender: mpsc::Sender<MetricsBatch>,
     },
 }
 
+#[derive(Debug)]
 enum MetricsBatch {
     Statistics(Vec<MetricDatum>),
     Histogram(MetricDatum),
 }
 
+#[derive(Debug)]
 enum Value {
     Counter(u64),
     Gauge(i64),
@@ -69,6 +73,7 @@ struct Collector {
     config: &'static Config,
 }
 
+#[derive(Debug)]
 struct Datum {
     key: Key,
     value: Value,
@@ -108,14 +113,24 @@ pub async fn init_future(config: Config) -> Result<(), Error> {
 
     let (collect_sender, collect_receiver) = mpsc::channel(1024);
     let (emit_sender, emit_receiver) = mpsc::channel(1024);
-    let mut stream = stream::select(
-        collect_receiver.map(Message::Datum),
-        mk_send_batch_timer(emit_sender, config),
+    let mut message_stream = Box::pin(
+        stream::select(
+            collect_receiver.map(Message::Datum),
+            mk_send_batch_timer(emit_sender.clone(), config),
+        )
+        .take_until(config.shutdown_signal.clone().map(|_| true))
+        .chain(stream::once(async move {
+            // Send a final flush on shutdown
+            Message::SendBatch {
+                send_all_before: std::u64::MAX,
+                emit_sender,
+            }
+        })),
     );
     let emitter = mk_emitter(emit_receiver, config);
     let mut collector = Collector::new(config);
     let collection_fut = async {
-        while let Some(msg) = stream.next().await {
+        while let Some(msg) = message_stream.next().await {
             collector.accept(msg);
         }
     };
@@ -133,8 +148,10 @@ async fn mk_emitter(mut emit_receiver: mpsc::Receiver<MetricsBatch>, config: &Co
             metric_data,
             namespace: config.cloudwatch_namespace.clone(),
         });
-        if let Err(e) = tokio::time::timeout(SEND_TIMEOUT, send_fut).await {
-            log::warn!("Failed to send metrics: {}", e);
+        match tokio::time::timeout(SEND_TIMEOUT, send_fut).await {
+            Ok(Ok(())) => log::debug!("Successfully sent a metrics batch to CloudWatch."),
+            Ok(Err(e)) => log::warn!("Failed to send metrics: {}", e),
+            Err(tokio::time::Elapsed { .. }) => log::warn!("Failed to send metrics: send timeout"),
         }
     };
     while let Some(metrics) = emit_receiver.next().await {
@@ -159,12 +176,15 @@ async fn mk_emitter(mut emit_receiver: mpsc::Receiver<MetricsBatch>, config: &Co
 
 fn mk_send_batch_timer(
     emit_sender: mpsc::Sender<MetricsBatch>,
-    config: &Config,
+    config: &'static Config,
 ) -> impl Stream<Item = Message> {
     let interval = Duration::from_secs(config.send_interval_secs);
-    tokio::time::interval(interval).map(move |tick_ts| Message::SendBatch {
-        tick_ts: tick_ts.into_std(),
-        emit_sender: emit_sender.clone(),
+    tokio::time::interval_at(tokio::time::Instant::now(), interval).map(move |_instant| {
+        let send_all_before = time_key(current_timestamp(), config.storage_resolution) - 1;
+        Message::SendBatch {
+            send_all_before,
+            emit_sender: emit_sender.clone(),
+        }
     })
 }
 
@@ -196,9 +216,9 @@ impl Collector {
         let result = match message {
             Message::Datum(datum) => Ok(self.accept_datum(datum)),
             Message::SendBatch {
-                tick_ts,
+                send_all_before,
                 emit_sender,
-            } => self.accept_send_batch(tick_ts, emit_sender),
+            } => self.accept_send_batch(send_all_before, emit_sender),
         };
         if let Err(e) = result {
             log::warn!("Failed to accept message: {}", e);
@@ -247,13 +267,17 @@ impl Collector {
             .collect()
     }
 
+    /// Sends a batch of the earliest collected metrics to CloudWatch
+    ///
+    /// # Params
+    /// * send_all_before: All messages before this timestamp should be split off from the aggregation and
+    /// sent to CloudWatch
     fn accept_send_batch(
         &mut self,
-        _tick_ts: Instant,
+        send_all_before: Timestamp,
         mut emit_sender: mpsc::Sender<MetricsBatch>,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let breakoff = current_timestamp() - 1;
-        let mut range = self.metrics_data.split_off(&breakoff);
+        let mut range = self.metrics_data.split_off(&send_all_before);
         mem::swap(&mut range, &mut self.metrics_data);
 
         let mut metrics_batch = vec![];
@@ -323,7 +347,10 @@ impl Collector {
                 }
             }
         }
-        Ok(emit_sender.try_send(MetricsBatch::Statistics(metrics_batch))?)
+        if !metrics_batch.is_empty() {
+            emit_sender.try_send(MetricsBatch::Statistics(metrics_batch))?;
+        }
+        Ok(())
     }
 
     fn default_dimensions(&self) -> impl Iterator<Item = Dimension> {
@@ -350,7 +377,6 @@ impl Recorder for RecorderHandle {
         });
     }
 
-    // TODO: impl histogram, using MetricDatum { counts, values, }
     fn record_histogram(&self, key: Key, value: u64) {
         let _ = self.0.clone().try_send(Datum {
             key,

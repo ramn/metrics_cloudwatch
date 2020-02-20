@@ -1,12 +1,14 @@
 use std::{collections::BTreeMap, fmt};
 
+use futures::{future, prelude::*};
+use rusoto_cloudwatch::CloudWatchClient;
+use rusoto_core::Region;
+
 use crate::{
     collector::{self, ClientBuilder, Config, Resolution},
     error::Error,
+    BoxFuture,
 };
-
-use rusoto_cloudwatch::CloudWatchClient;
-pub use {rusoto_cloudwatch::CloudWatch, rusoto_core::Region};
 
 #[derive(Default)]
 pub struct Builder {
@@ -16,6 +18,7 @@ pub struct Builder {
     send_interval_secs: Option<u64>,
     region: Option<Region>,
     client_builder: Option<ClientBuilder>,
+    shutdown_signal: Option<BoxFuture<'static, ()>>,
 }
 
 pub fn builder() -> Builder {
@@ -75,9 +78,19 @@ impl Builder {
         }
     }
 
+    /// Sets a closure that can produce a CloudWatch client.
     pub fn client_builder(self, client_builder: ClientBuilder) -> Self {
         Self {
             client_builder: Some(client_builder),
+            ..self
+        }
+    }
+
+    /// Sets a future that acts as a shutdown signal when it completes.
+    /// Completion of this future will trigger a final flush of metrics to CloudWatch.
+    pub fn shutdown_signal(self, shutdown_signal: BoxFuture<'static, ()>) -> Self {
+        Self {
+            shutdown_signal: Some(shutdown_signal),
             ..self
         }
     }
@@ -101,6 +114,10 @@ impl Builder {
             send_interval_secs: self.send_interval_secs.unwrap_or(10),
             region: self.region.unwrap_or(Region::UsEast1),
             client_builder: self.client_builder.unwrap_or_else(default_client_builder),
+            shutdown_signal: self
+                .shutdown_signal
+                .unwrap_or_else(|| Box::pin(future::pending()))
+                .shared(),
         })
     }
 }
@@ -114,6 +131,7 @@ impl fmt::Debug for Builder {
             send_interval_secs,
             region,
             client_builder: _,
+            shutdown_signal: _,
         } = self;
         f.debug_struct("Builder")
             .field("cloudwatch_namespace", cloudwatch_namespace)
@@ -122,6 +140,7 @@ impl fmt::Debug for Builder {
             .field("send_interval_secs", send_interval_secs)
             .field("region", region)
             .field("client_builder", &"<Fn(Region) -> Box<dyn CloudWatch>")
+            .field("shutdown_signal", &"BoxFuture")
             .finish()
     }
 }
