@@ -7,14 +7,13 @@ use std::{
 use {
     futures::{channel::mpsc, future, prelude::*, stream},
     metrics::{Key, Recorder},
-    rusoto_cloudwatch::{
-        CloudWatch, CloudWatchClient, Dimension, MetricDatum, PutMetricDataInput, StatisticSet,
-    },
+    rusoto_cloudwatch::{CloudWatch, Dimension, MetricDatum, PutMetricDataInput, StatisticSet},
     rusoto_core::Region,
 };
 
 use crate::error::Error;
 
+pub type ClientBuilder = Box<dyn Fn(Region) -> Box<dyn CloudWatch> + Send>;
 type Count = usize;
 type HistogramValue = u64;
 type Timestamp = u64;
@@ -30,6 +29,7 @@ pub struct Config {
     pub storage_resolution: Resolution,
     pub send_interval_secs: u64,
     pub region: Region,
+    pub client_builder: ClientBuilder,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -127,7 +127,7 @@ pub async fn init_future(config: Config) -> Result<(), Error> {
 }
 
 async fn mk_emitter(mut emit_receiver: mpsc::Receiver<MetricsBatch>, config: &Config) {
-    let cloudwatch_client = CloudWatchClient::new(config.region.clone());
+    let cloudwatch_client = (config.client_builder)(config.region.clone());
     let put = |metric_data| async {
         let send_fut = cloudwatch_client.put_metric_data(PutMetricDataInput {
             metric_data,
