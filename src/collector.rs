@@ -126,6 +126,8 @@ pub async fn init_future(config: Config) -> Result<(), Error> {
         while let Some(msg) = message_stream.next().await {
             collector.accept(msg);
         }
+        // Need to drop this before flushing or we deadlock on shutdown
+        drop(message_stream);
         // Send a final flush on shutdown
         collector.accept(Message::SendBatch {
             send_all_before: std::u64::MAX,
