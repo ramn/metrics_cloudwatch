@@ -21,4 +21,9 @@ log = "0.4.8"
 metrics = { version = "0.12.1", features = ["std"] }
 rusoto_cloudwatch = "0.43.0-beta.1"
 rusoto_core = "0.43.0-beta.1"
+stream-cancel = "0.5.2"
 tokio = { version = "0.2.11", features = ["full"] }
+
+[dev-dependencies]
+async-trait = "0.1.24"
+tokio = { version = "0.2.11", features = ["full", "test-util"] }

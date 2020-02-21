@@ -1,23 +1,41 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, fmt};
+
+use futures::{future, prelude::*};
+use rusoto_cloudwatch::CloudWatchClient;
+use rusoto_core::Region;
 
 use crate::{
-    collector::{self, Config, Resolution},
+    collector::{self, ClientBuilder, Config, Resolution},
     error::Error,
+    BoxFuture,
 };
 
-pub use rusoto_core::Region;
-
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct Builder {
     cloudwatch_namespace: Option<String>,
     default_dimensions: BTreeMap<String, String>,
     storage_resolution: Option<Resolution>,
     send_interval_secs: Option<u64>,
     region: Option<Region>,
+    client_builder: Option<ClientBuilder>,
+    shutdown_signal: Option<BoxFuture<'static, ()>>,
 }
 
 pub fn builder() -> Builder {
     Builder::default()
+}
+
+fn default_client_builder() -> ClientBuilder {
+    Box::new(|region| Box::new(CloudWatchClient::new(region)))
+}
+
+fn extract_namespace(cloudwatch_namespace: Option<String>) -> Result<String, Error> {
+    match cloudwatch_namespace {
+        Some(namespace) if !namespace.is_empty() => Ok(namespace),
+        _ => Err(Error::BuilderIncomplete(
+            "cloudwatch_namespace missing".into(),
+        )),
+    }
 }
 
 impl Builder {
@@ -60,6 +78,23 @@ impl Builder {
         }
     }
 
+    /// Sets a closure that can produce a CloudWatch client.
+    pub fn client_builder(self, client_builder: ClientBuilder) -> Self {
+        Self {
+            client_builder: Some(client_builder),
+            ..self
+        }
+    }
+
+    /// Sets a future that acts as a shutdown signal when it completes.
+    /// Completion of this future will trigger a final flush of metrics to CloudWatch.
+    pub fn shutdown_signal(self, shutdown_signal: BoxFuture<'static, ()>) -> Self {
+        Self {
+            shutdown_signal: Some(shutdown_signal),
+            ..self
+        }
+    }
+
     /// Initializes the CloudWatch metrics backend and runs it in a new thread
     pub fn init_thread(self) -> Result<(), Error> {
         collector::init(self.build_config()?);
@@ -78,15 +113,34 @@ impl Builder {
             storage_resolution: self.storage_resolution.unwrap_or(Resolution::Minute),
             send_interval_secs: self.send_interval_secs.unwrap_or(10),
             region: self.region.unwrap_or(Region::UsEast1),
+            client_builder: self.client_builder.unwrap_or_else(default_client_builder),
+            shutdown_signal: self
+                .shutdown_signal
+                .unwrap_or_else(|| Box::pin(future::pending()))
+                .shared(),
         })
     }
 }
 
-fn extract_namespace(cloudwatch_namespace: Option<String>) -> Result<String, Error> {
-    match cloudwatch_namespace {
-        Some(namespace) if !namespace.is_empty() => Ok(namespace),
-        _ => Err(Error::BuilderIncomplete(
-            "cloudwatch_namespace missing".into(),
-        )),
+impl fmt::Debug for Builder {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self {
+            cloudwatch_namespace,
+            default_dimensions,
+            storage_resolution,
+            send_interval_secs,
+            region,
+            client_builder: _,
+            shutdown_signal: _,
+        } = self;
+        f.debug_struct("Builder")
+            .field("cloudwatch_namespace", cloudwatch_namespace)
+            .field("default_dimensions", default_dimensions)
+            .field("storage_resolution", storage_resolution)
+            .field("send_interval_secs", send_interval_secs)
+            .field("region", region)
+            .field("client_builder", &"<Fn(Region) -> Box<dyn CloudWatch>")
+            .field("shutdown_signal", &"BoxFuture")
+            .finish()
     }
 }

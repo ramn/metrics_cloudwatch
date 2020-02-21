@@ -33,3 +33,14 @@ fn main() {
     metrics::counter!("requests", 1);
 }
 ```
+
+Limitations
+-----------
+
+The CloudWatch metrics API imposes some limitations.
+
+* Max 10 labels (dimensions) per metric
+* Max 150 unique histogram values (used by `timing!()` and `value!()`) per API
+call. Going beyond this works but will incur one API call per batch of 150
+unique values. Could be a good idea to measure timing in milliseconds rather
+than nanoseconds, to keep down the number of unique values.
