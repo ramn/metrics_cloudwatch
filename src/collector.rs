@@ -118,14 +118,7 @@ pub async fn init_future(config: Config) -> Result<(), Error> {
             collect_receiver.map(Message::Datum),
             mk_send_batch_timer(emit_sender.clone(), config),
         )
-        .take_until(config.shutdown_signal.clone().map(|_| true))
-        .chain(stream::once(async move {
-            // Send a final flush on shutdown
-            Message::SendBatch {
-                send_all_before: std::u64::MAX,
-                emit_sender,
-            }
-        })),
+        .take_until(config.shutdown_signal.clone().map(|_| true)),
     );
     let emitter = mk_emitter(emit_receiver, config);
     let mut collector = Collector::new(config);
@@ -133,6 +126,11 @@ pub async fn init_future(config: Config) -> Result<(), Error> {
         while let Some(msg) = message_stream.next().await {
             collector.accept(msg);
         }
+        // Send a final flush on shutdown
+        collector.accept(Message::SendBatch {
+            send_all_before: std::u64::MAX,
+            emit_sender,
+        });
     };
     let process_fut = future::join(collection_fut, emitter.map(|_| ()));
     let recorder = Box::new(RecorderHandle(collect_sender));
