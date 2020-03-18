@@ -1,5 +1,9 @@
+0.4.0
+-----
+* Upgrade dependencies
+
 0.3.0
-----
+-----
 * timing!() and value!() metrics types now use a histogram, which enables
 percentiles in CloudWatch. However this could lead to more API calls, if there
 are many unique values. See Limitations in the README.

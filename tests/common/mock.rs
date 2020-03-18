@@ -2,10 +2,7 @@
 use std::sync::Arc;
 
 use {
-    async_trait::async_trait,
-    rusoto_cloudwatch::*,
-    rusoto_core::{RusotoError, RusotoFuture},
-    tokio::sync::Mutex,
+    async_trait::async_trait, rusoto_cloudwatch::*, rusoto_core::RusotoError, tokio::sync::Mutex,
 };
 
 #[derive(Clone, Default)]
