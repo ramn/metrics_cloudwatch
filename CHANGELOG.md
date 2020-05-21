@@ -1,3 +1,7 @@
+0.5.0
+-----
+* Fix conflict with StreamExt::take_until
+
 0.4.0
 -----
 * Upgrade dependencies
