@@ -9,7 +9,6 @@ use {
     metrics::{Key, Recorder},
     rusoto_cloudwatch::{CloudWatch, Dimension, MetricDatum, PutMetricDataInput, StatisticSet},
     rusoto_core::Region,
-    stream_cancel::StreamExt as _,
 };
 
 use crate::{error::Error, BoxFuture};
