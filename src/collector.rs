@@ -33,6 +33,11 @@ pub struct Config {
     pub shutdown_signal: future::Shared<BoxFuture<'static, ()>>,
 }
 
+struct CollectorConfig {
+    default_dimensions: BTreeMap<String, String>,
+    storage_resolution: Resolution,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub enum Resolution {
     Second,
@@ -69,7 +74,7 @@ struct Aggregate {
 
 struct Collector {
     metrics_data: BTreeMap<Timestamp, HashMap<Key, Aggregate>>,
-    config: &'static Config,
+    config: CollectorConfig,
 }
 
 #[derive(Debug)]
@@ -89,7 +94,7 @@ struct HistogramDatum {
     value: f64,
 }
 
-struct RecorderHandle(mpsc::Sender<Datum>);
+pub struct RecorderHandle(mpsc::Sender<Datum>);
 
 pub fn init(config: Config) {
     let _ = thread::spawn(|| {
@@ -108,20 +113,31 @@ pub fn init(config: Config) {
 }
 
 pub async fn init_future(config: Config) -> Result<(), Error> {
-    let config: &'static _ = Box::leak(Box::new(config));
+    let (recorder, task) = new(config);
+    metrics::set_boxed_recorder(Box::new(recorder)).map_err(Error::SetRecorder)?;
+    task.await;
+    Ok(())
+}
 
+pub fn new(config: Config) -> (RecorderHandle, impl Future<Output = ()>) {
     let (collect_sender, collect_receiver) = mpsc::channel(1024);
     let (emit_sender, emit_receiver) = mpsc::channel(1024);
     let mut message_stream = Box::pin(
         stream::select(
             collect_receiver.map(Message::Datum),
-            mk_send_batch_timer(emit_sender.clone(), config),
+            mk_send_batch_timer(emit_sender.clone(), &config),
         )
         .take_until(config.shutdown_signal.clone().map(|_| true)),
     );
-    let emitter = mk_emitter(emit_receiver, config);
-    let mut collector = Collector::new(config);
-    let collection_fut = async {
+    let emitter = mk_emitter(emit_receiver, &config);
+
+    let internal_config = CollectorConfig {
+        default_dimensions: config.default_dimensions,
+        storage_resolution: config.storage_resolution,
+    };
+
+    let mut collector = Collector::new(internal_config);
+    let collection_fut = async move {
         while let Some(msg) = message_stream.next().await {
             collector.accept(msg);
         }
@@ -133,53 +149,65 @@ pub async fn init_future(config: Config) -> Result<(), Error> {
             emit_sender,
         });
     };
-    let process_fut = future::join(collection_fut, emitter.map(|_| ()));
-    let recorder = Box::new(RecorderHandle(collect_sender));
-    metrics::set_boxed_recorder(recorder).map_err(Error::SetRecorder)?;
-    process_fut.await;
-    Ok(())
+    (
+        RecorderHandle(collect_sender),
+        future::join(collection_fut, emitter.map(|_| ())).map(|_| ()),
+    )
 }
 
-async fn mk_emitter(mut emit_receiver: mpsc::Receiver<MetricsBatch>, config: &Config) {
+fn mk_emitter(
+    mut emit_receiver: mpsc::Receiver<MetricsBatch>,
+    config: &Config,
+) -> impl Future<Output = ()> {
     let cloudwatch_client = (config.client_builder)(config.region.clone());
-    let put = |metric_data| async {
-        let send_fut = cloudwatch_client.put_metric_data(PutMetricDataInput {
-            metric_data,
-            namespace: config.cloudwatch_namespace.clone(),
-        });
-        match tokio::time::timeout(SEND_TIMEOUT, send_fut).await {
-            Ok(Ok(())) => log::debug!("Successfully sent a metrics batch to CloudWatch."),
-            Ok(Err(e)) => log::warn!("Failed to send metrics: {}", e),
-            Err(tokio::time::Elapsed { .. }) => log::warn!("Failed to send metrics: send timeout"),
-        }
-    };
-    while let Some(metrics) = emit_receiver.next().await {
-        let mut requests = vec![];
-        match metrics {
-            MetricsBatch::Statistics(mut metrics) => loop {
-                let mut batch = metrics.split_off(MAX_CW_METRICS_PER_CALL.min(metrics.len()));
-                mem::swap(&mut batch, &mut metrics);
-                if batch.is_empty() {
-                    break;
-                } else {
-                    requests.push(put(batch));
+    let cloudwatch_namespace = config.cloudwatch_namespace.clone();
+
+    async move {
+        let put = |metric_data| {
+            let cloudwatch_namespace = cloudwatch_namespace.clone();
+            async {
+                let send_fut = cloudwatch_client.put_metric_data(PutMetricDataInput {
+                    metric_data,
+                    namespace: cloudwatch_namespace,
+                });
+                match tokio::time::timeout(SEND_TIMEOUT, send_fut).await {
+                    Ok(Ok(())) => log::debug!("Successfully sent a metrics batch to CloudWatch."),
+                    Ok(Err(e)) => log::warn!("Failed to send metrics: {}", e),
+                    Err(tokio::time::Elapsed { .. }) => {
+                        log::warn!("Failed to send metrics: send timeout")
+                    }
                 }
-            },
-            MetricsBatch::Histogram(histogram) => {
-                requests.push(put(vec![histogram]));
             }
+        };
+        while let Some(metrics) = emit_receiver.next().await {
+            let mut requests = vec![];
+            match metrics {
+                MetricsBatch::Statistics(mut metrics) => loop {
+                    let mut batch = metrics.split_off(MAX_CW_METRICS_PER_CALL.min(metrics.len()));
+                    mem::swap(&mut batch, &mut metrics);
+                    if batch.is_empty() {
+                        break;
+                    } else {
+                        requests.push(put(batch));
+                    }
+                },
+                MetricsBatch::Histogram(histogram) => {
+                    requests.push(put(vec![histogram]));
+                }
+            }
+            future::join_all(requests).map(|_| ()).await;
         }
-        future::join_all(requests).map(|_| ()).await;
     }
 }
 
 fn mk_send_batch_timer(
     emit_sender: mpsc::Sender<MetricsBatch>,
-    config: &'static Config,
+    config: &Config,
 ) -> impl Stream<Item = Message> {
     let interval = Duration::from_secs(config.send_interval_secs);
+    let storage_resolution = config.storage_resolution;
     tokio::time::interval_at(tokio::time::Instant::now(), interval).map(move |_instant| {
-        let send_all_before = time_key(current_timestamp(), config.storage_resolution) - 1;
+        let send_all_before = time_key(current_timestamp(), storage_resolution) - 1;
         Message::SendBatch {
             send_all_before,
             emit_sender: emit_sender.clone(),
@@ -204,7 +232,7 @@ fn time_key(timestamp: Timestamp, resolution: Resolution) -> Timestamp {
 }
 
 impl Collector {
-    fn new(config: &'static Config) -> Self {
+    fn new(config: CollectorConfig) -> Self {
         Self {
             metrics_data: Default::default(),
             config,
