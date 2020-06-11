@@ -12,7 +12,8 @@ pub use {
 use std::{future::Future, pin::Pin};
 
 mod builder;
-mod collector;
+#[doc(hidden)]
+pub mod collector;
 mod error;
 
-pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + Sync + 'a>>;
+pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
