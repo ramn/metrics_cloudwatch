@@ -345,7 +345,7 @@ impl Collector {
                         // value passed to each `increment_counter` call.
                         //
                         // In the case where we only increment by `1` each call the latter makes
-                        // in and max basically useless since the end result will leave both as `1`.
+                        // min and max basically useless since the end result will leave both as `1`.
                         // In the case where we sum the count first before calling
                         // `increment_counter` we do lose some granularity as the latter would give
                         // a spread in min/max.
