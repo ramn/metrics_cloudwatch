@@ -66,8 +66,14 @@ enum Value {
 }
 
 #[derive(Clone, Debug, Default)]
+pub struct Counter {
+    sample_count: u64,
+    sum: u64,
+}
+
+#[derive(Clone, Debug, Default)]
 struct Aggregate {
-    counter: StatisticSet,
+    counter: Counter,
     gauge: StatisticSet,
     histogram: HashMap<HistogramValue, Count>,
 }
@@ -263,19 +269,19 @@ impl Collector {
             .entry(datum.key)
             .or_default();
 
-        let apply_stats = |stats_set: &mut StatisticSet, value: f64| {
-            stats_set.sample_count += 1.0;
-            stats_set.sum += value;
-            stats_set.maximum = stats_set.maximum.max(value);
-            stats_set.minimum = stats_set.minimum.min(value);
-        };
-
         match datum.value {
             Value::Counter(value) => {
-                apply_stats(&mut aggregate.counter, value as f64);
+                let counter = &mut aggregate.counter;
+                counter.sample_count += 1;
+                counter.sum += value;
             }
             Value::Gauge(value) => {
-                apply_stats(&mut aggregate.gauge, value as f64);
+                let value = value as f64;
+                let gauge = &mut aggregate.gauge;
+                gauge.sample_count += 1.0;
+                gauge.sum += value;
+                gauge.maximum = gauge.maximum.max(value);
+                gauge.minimum = gauge.minimum.min(value);
             }
             Value::Histogram(value) => {
                 *aggregate.histogram.entry(value).or_default() += 1;
@@ -330,8 +336,29 @@ impl Collector {
                     ..Default::default()
                 };
 
-                if counter.sample_count > 0.0 {
-                    metrics_batch.push(stats_set_datum(counter, Some("Count".to_owned())));
+                if counter.sample_count > 0 {
+                    let sum = counter.sum as f64;
+                    let stats_set = StatisticSet {
+                        sample_count: counter.sample_count as f64,
+                        sum,
+                        // Max and min for a count can either be the sum or the max/min of the
+                        // value passed to each `increment_counter` call.
+                        //
+                        // In the case where we only increment by `1` each call the latter makes
+                        // in and max basically useless since the end result will leave both as `1`.
+                        // In the case where we sum the count first before calling
+                        // `increment_counter` we do lose some granularity as the latter would give
+                        // a spread in min/max.
+                        // However if that is an interesting metric it would often be
+                        // better modeled as the gauge (measuring how much were processed in each
+                        // batch).
+                        //
+                        // Therefor we opt to send the sum to give a measure of how many
+                        // counts *this* metrics instance observed in this time period.
+                        maximum: sum,
+                        minimum: sum,
+                    };
+                    metrics_batch.push(stats_set_datum(stats_set, Some("Count".to_owned())));
                 }
                 if gauge.sample_count > 0.0 {
                     metrics_batch.push(stats_set_datum(gauge, None));
