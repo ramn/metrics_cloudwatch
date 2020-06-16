@@ -1,7 +1,7 @@
 use std::{error::Error, time::Duration};
 
 use futures::prelude::*;
-use rusoto_cloudwatch::CloudWatch;
+use rusoto_cloudwatch::{CloudWatch, StatisticSet};
 
 use common::MockCloudWatchClient;
 
@@ -31,6 +31,7 @@ async fn test_flush_on_shutdown() -> Result<(), Box<dyn Error>> {
 
     for i in 0..150 {
         metrics::value!("test", i);
+        metrics::counter!("count", 1);
     }
     metrics::value!("test", 0);
     metrics::value!("test", 200);
@@ -41,7 +42,7 @@ async fn test_flush_on_shutdown() -> Result<(), Box<dyn Error>> {
     joinhandle.await??;
 
     let actual = client.put_metric_data.lock().await;
-    assert_eq!(actual.len(), 2);
+    assert_eq!(actual.len(), 3);
 
     assert_eq!(actual[0].metric_data.len(), 1);
     assert_eq!(actual[0].metric_data[0].counts.as_ref().unwrap().len(), 150);
@@ -50,5 +51,17 @@ async fn test_flush_on_shutdown() -> Result<(), Box<dyn Error>> {
     assert_eq!(actual[1].metric_data.len(), 1);
     assert_eq!(actual[1].metric_data[0].counts.as_ref().unwrap().len(), 1);
     assert_eq!(actual[1].metric_data[0].values.as_ref().unwrap().len(), 1);
+
+    assert_eq!(actual[2].metric_data.len(), 1);
+    let count_data = &actual[2].metric_data[0];
+    assert_eq!(
+        count_data.statistic_values,
+        Some(StatisticSet {
+            sample_count: 150.0,
+            sum: 150.0,
+            maximum: 150.0,
+            minimum: 150.0
+        })
+    );
     Ok(())
 }
