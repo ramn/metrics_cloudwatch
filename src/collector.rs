@@ -294,9 +294,15 @@ impl Collector {
             name: l.key().to_owned(),
             value: l.value().to_owned(),
         });
-        self.default_dimensions()
+        let all_dims: BTreeMap<_, _> = self
+            .default_dimensions()
             .chain(dimensions_from_keys)
+            .map(|d| (d.name.clone(), d))
+            .collect();
+        all_dims
+            .into_iter()
             .take(MAX_CLOUDWATCH_DIMENSIONS)
+            .map(|(_, d)| d)
             .collect()
     }
 
@@ -450,11 +456,45 @@ impl Resolution {
 
 #[cfg(test)]
 mod tests {
+    use metrics::Label;
+
     use super::*;
 
     #[test]
     fn time_key_should_truncate() {
         assert_eq!(time_key(370, Resolution::Second), 370);
         assert_eq!(time_key(370, Resolution::Minute), 360);
+    }
+
+    #[test]
+    fn should_override_default_dimensions() {
+        let collector = Collector::new(CollectorConfig {
+            default_dimensions: vec![
+                ("my-dim".to_owned(), "initial-value".to_owned()),
+                ("another-dim".to_owned(), "random-value".to_owned()),
+            ]
+            .into_iter()
+            .collect(),
+            storage_resolution: Resolution::Minute,
+        });
+
+        let key =
+            Key::from_name_and_labels("my-metric", vec![Label::from(("my-dim", "override-value"))]);
+        let actual = collector.dimensions(&key);
+        assert_eq!(actual.len(), 2);
+        assert_eq!(
+            actual[0],
+            Dimension {
+                name: "another-dim".into(),
+                value: "random-value".into()
+            }
+        );
+        assert_eq!(
+            actual[1],
+            Dimension {
+                name: "my-dim".into(),
+                value: "override-value".into()
+            }
+        );
     }
 }
