@@ -290,20 +290,37 @@ impl Collector {
     }
 
     fn dimensions(&self, key: &Key) -> Vec<Dimension> {
-        let dimensions_from_keys = key.labels().map(|l| Dimension {
-            name: l.key().to_owned(),
-            value: l.value().to_owned(),
-        });
-        let all_dims: BTreeMap<_, _> = self
+        let mut dimensions_from_keys = key
+            .labels()
+            .map(|l| Dimension {
+                name: l.key().to_owned(),
+                value: l.value().to_owned(),
+            })
+            .peekable();
+
+        let has_extra_dimensions = dimensions_from_keys.peek().is_some();
+
+        let mut all_dims: Vec<_> = self
             .default_dimensions()
             .chain(dimensions_from_keys)
-            .map(|d| (d.name.clone(), d))
             .collect();
+
+        if has_extra_dimensions {
+            // Reverse order, so that the last value will override when we dedup
+            all_dims.reverse();
+            all_dims.sort_by(|a, b| a.name.cmp(&b.name));
+            all_dims.dedup_by(|a, b| a.name == b.name);
+        }
+
+        if all_dims.len() > MAX_CLOUDWATCH_DIMENSIONS {
+            all_dims.truncate(MAX_CLOUDWATCH_DIMENSIONS);
+            log::warn!(
+                "Too many dimensions, taking only {}",
+                MAX_CLOUDWATCH_DIMENSIONS
+            );
+        }
+
         all_dims
-            .into_iter()
-            .take(MAX_CLOUDWATCH_DIMENSIONS)
-            .map(|(_, d)| d)
-            .collect()
     }
 
     /// Sends a batch of the earliest collected metrics to CloudWatch
@@ -470,31 +487,45 @@ mod tests {
     fn should_override_default_dimensions() {
         let collector = Collector::new(CollectorConfig {
             default_dimensions: vec![
-                ("my-dim".to_owned(), "initial-value".to_owned()),
-                ("another-dim".to_owned(), "random-value".to_owned()),
+                ("second".to_owned(), "123".to_owned()),
+                ("first".to_owned(), "initial-value".to_owned()),
             ]
             .into_iter()
             .collect(),
             storage_resolution: Resolution::Minute,
         });
 
-        let key =
-            Key::from_name_and_labels("my-metric", vec![Label::from(("my-dim", "override-value"))]);
-        let actual = collector.dimensions(&key);
-        assert_eq!(actual.len(), 2);
-        assert_eq!(
-            actual[0],
-            Dimension {
-                name: "another-dim".into(),
-                value: "random-value".into()
-            }
+        let key = Key::from_name_and_labels(
+            "my-metric",
+            vec![
+                Label::from(("zzz", "123")),
+                Label::from(("first", "override-value")),
+                Label::from(("aaa", "123")),
+            ],
         );
+
+        let actual = collector.dimensions(&key);
+
         assert_eq!(
-            actual[1],
-            Dimension {
-                name: "my-dim".into(),
-                value: "override-value".into()
-            }
+            actual,
+            vec![
+                Dimension {
+                    name: "aaa".into(),
+                    value: "123".into()
+                },
+                Dimension {
+                    name: "first".into(),
+                    value: "override-value".into()
+                },
+                Dimension {
+                    name: "second".into(),
+                    value: "123".into()
+                },
+                Dimension {
+                    name: "zzz".into(),
+                    value: "123".into()
+                },
+            ],
         );
     }
 }
