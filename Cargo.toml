@@ -15,19 +15,19 @@ keywords = ["metrics", "cloudwatch", "aws"]
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-chrono = "0.4.11"
+chrono = "0.4.13"
 futures = "0.3.5"
-log = "0.4.8"
+log = "0.4.11"
 metrics = { version = "0.12.1", features = ["std"] }
-rusoto_cloudwatch = "0.43.0"
-rusoto_core = "0.43.0"
-stream-cancel = "0.5.2"
-tokio = { version = "0.2.13", features = ["full"] }
+rusoto_cloudwatch = "0.44.0"
+rusoto_core = "0.44.0"
+stream-cancel = "0.6.1"
+tokio = { version = "0.2.21", features = ["full"] }
 
 [dev-dependencies]
-async-trait = "0.1.24"
-criterion = "0.3"
-tokio = { version = "0.2.13", features = ["full", "test-util"] }
+async-trait = "0.1.36"
+criterion = "0.3.3"
+tokio = { version = "0.2.21", features = ["full", "test-util"] }
 
 
 [[bench]]

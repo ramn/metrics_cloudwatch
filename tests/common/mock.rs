@@ -215,4 +215,11 @@ impl CloudWatch for MockCloudWatchClient {
     ) -> Result<UntagResourceOutput, RusotoError<UntagResourceError>> {
         todo!()
     }
+
+    async fn put_composite_alarm(
+        &self,
+        input: PutCompositeAlarmInput,
+    ) -> Result<(), RusotoError<PutCompositeAlarmError>> {
+        todo!()
+    }
 }
