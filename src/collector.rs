@@ -48,14 +48,8 @@ enum Message {
     Datum(Datum),
     SendBatch {
         send_all_before: Timestamp,
-        emit_sender: mpsc::Sender<MetricsBatch>,
+        emit_sender: mpsc::Sender<Vec<MetricDatum>>,
     },
-}
-
-#[derive(Debug)]
-enum MetricsBatch {
-    Statistics(Vec<MetricDatum>),
-    Histogram(MetricDatum),
 }
 
 #[derive(Debug)]
@@ -162,7 +156,7 @@ pub fn new(config: Config) -> (RecorderHandle, impl Future<Output = ()>) {
 }
 
 fn mk_emitter(
-    mut emit_receiver: mpsc::Receiver<MetricsBatch>,
+    mut emit_receiver: mpsc::Receiver<Vec<MetricDatum>>,
     config: &Config,
 ) -> impl Future<Output = ()> {
     let cloudwatch_client = (config.client_builder)(config.region.clone());
@@ -186,28 +180,19 @@ fn mk_emitter(
             }
         };
         while let Some(metrics) = emit_receiver.next().await {
-            let mut requests = vec![];
-            match metrics {
-                MetricsBatch::Statistics(mut metrics) => loop {
-                    let mut batch = metrics.split_off(MAX_CW_METRICS_PER_CALL.min(metrics.len()));
-                    mem::swap(&mut batch, &mut metrics);
-                    if batch.is_empty() {
-                        break;
-                    } else {
-                        requests.push(put(batch));
-                    }
-                },
-                MetricsBatch::Histogram(histogram) => {
-                    requests.push(put(vec![histogram]));
-                }
-            }
-            future::join_all(requests).map(|_| ()).await;
+            future::join_all(
+                metrics
+                    .chunks(MAX_CW_METRICS_PER_CALL)
+                    .map(|metrics_chunk| put(metrics_chunk.to_owned())),
+            )
+            .map(|_| ())
+            .await;
         }
     }
 }
 
 fn mk_send_batch_timer(
-    emit_sender: mpsc::Sender<MetricsBatch>,
+    emit_sender: mpsc::Sender<Vec<MetricDatum>>,
     config: &Config,
 ) -> impl Stream<Item = Message> {
     let interval = Duration::from_secs(config.send_interval_secs);
@@ -308,7 +293,7 @@ impl Collector {
     fn accept_send_batch(
         &mut self,
         send_all_before: Timestamp,
-        mut emit_sender: mpsc::Sender<MetricsBatch>,
+        mut emit_sender: mpsc::Sender<Vec<MetricDatum>>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut range = self.metrics_data.split_off(&send_all_before);
         mem::swap(&mut range, &mut self.metrics_data);
@@ -392,17 +377,13 @@ impl Collector {
                         if histogram.values.is_empty() {
                             break;
                         };
-                        let metrics_batch =
-                            MetricsBatch::Histogram(histogram_datum(histogram, None));
-                        if let Err(e) = emit_sender.try_send(metrics_batch) {
-                            log::debug!("error queueing: {}", e);
-                        }
+                        metrics_batch.push(histogram_datum(histogram, None));
                     }
                 }
             }
         }
         if !metrics_batch.is_empty() {
-            emit_sender.try_send(MetricsBatch::Statistics(metrics_batch))?;
+            emit_sender.try_send(metrics_batch)?;
         }
         Ok(())
     }
