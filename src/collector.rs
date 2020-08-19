@@ -155,40 +155,36 @@ pub fn new(config: Config) -> (RecorderHandle, impl Future<Output = ()>) {
     )
 }
 
-fn mk_emitter(
+async fn mk_emitter(
     mut emit_receiver: mpsc::Receiver<Vec<MetricDatum>>,
     cloudwatch_client: Box<dyn CloudWatch + Send + Sync>,
     cloudwatch_namespace: String,
-) -> impl Future<Output = ()> {
-    async move {
-        let cloudwatch_client = &cloudwatch_client;
-        let cloudwatch_namespace = &cloudwatch_namespace;
-        while let Some(metrics) = emit_receiver.next().await {
-            stream::iter(metrics_chunks(&metrics))
-                .for_each_concurrent(None, |metric_data| async move {
-                    let send_fut = cloudwatch_client.put_metric_data(PutMetricDataInput {
-                        metric_data: metric_data.to_owned(),
-                        namespace: cloudwatch_namespace.clone(),
-                    });
-                    match tokio::time::timeout(SEND_TIMEOUT, send_fut).await {
-                        Ok(Ok(())) => {
-                            log::debug!("Successfully sent a metrics batch to CloudWatch.")
-                        }
-                        Ok(Err(e)) => log::warn!(
-                            "Failed to send metrics: {:?}: {}",
-                            metric_data
-                                .iter()
-                                .map(|m| &m.metric_name)
-                                .collect::<Vec<_>>(),
-                            e,
-                        ),
-                        Err(tokio::time::Elapsed { .. }) => {
-                            log::warn!("Failed to send metrics: send timeout")
-                        }
+) {
+    let cloudwatch_client = &cloudwatch_client;
+    let cloudwatch_namespace = &cloudwatch_namespace;
+    while let Some(metrics) = emit_receiver.next().await {
+        stream::iter(metrics_chunks(&metrics))
+            .for_each_concurrent(None, |metric_data| async move {
+                let send_fut = cloudwatch_client.put_metric_data(PutMetricDataInput {
+                    metric_data: metric_data.to_owned(),
+                    namespace: cloudwatch_namespace.clone(),
+                });
+                match tokio::time::timeout(SEND_TIMEOUT, send_fut).await {
+                    Ok(Ok(())) => log::debug!("Successfully sent a metrics batch to CloudWatch."),
+                    Ok(Err(e)) => log::warn!(
+                        "Failed to send metrics: {:?}: {}",
+                        metric_data
+                            .iter()
+                            .map(|m| &m.metric_name)
+                            .collect::<Vec<_>>(),
+                        e,
+                    ),
+                    Err(tokio::time::Elapsed { .. }) => {
+                        log::warn!("Failed to send metrics: send timeout")
                     }
-                })
-                .await;
-        }
+                }
+            })
+            .await;
     }
 }
 
