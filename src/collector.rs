@@ -161,25 +161,32 @@ fn mk_emitter(
     cloudwatch_namespace: String,
 ) -> impl Future<Output = ()> {
     async move {
-        let put = |metric_data| {
-            let cloudwatch_namespace = cloudwatch_namespace.clone();
-            async {
-                let send_fut = cloudwatch_client.put_metric_data(PutMetricDataInput {
-                    metric_data,
-                    namespace: cloudwatch_namespace,
-                });
-                match tokio::time::timeout(SEND_TIMEOUT, send_fut).await {
-                    Ok(Ok(())) => log::debug!("Successfully sent a metrics batch to CloudWatch."),
-                    Ok(Err(e)) => log::warn!("Failed to send metrics: {}", e),
-                    Err(tokio::time::Elapsed { .. }) => {
-                        log::warn!("Failed to send metrics: send timeout")
-                    }
-                }
-            }
-        };
+        let cloudwatch_client = &cloudwatch_client;
+        let cloudwatch_namespace = &cloudwatch_namespace;
         while let Some(metrics) = emit_receiver.next().await {
-            future::join_all(metrics_chunks(&metrics).map(put))
-                .map(|_| ())
+            stream::iter(metrics_chunks(&metrics))
+                .for_each_concurrent(None, |metric_data| async move {
+                    let send_fut = cloudwatch_client.put_metric_data(PutMetricDataInput {
+                        metric_data: metric_data.to_owned(),
+                        namespace: cloudwatch_namespace.clone(),
+                    });
+                    match tokio::time::timeout(SEND_TIMEOUT, send_fut).await {
+                        Ok(Ok(())) => {
+                            log::debug!("Successfully sent a metrics batch to CloudWatch.")
+                        }
+                        Ok(Err(e)) => log::warn!(
+                            "Failed to send metrics: {:?}: {}",
+                            metric_data
+                                .iter()
+                                .map(|m| &m.metric_name)
+                                .collect::<Vec<_>>(),
+                            e,
+                        ),
+                        Err(tokio::time::Elapsed { .. }) => {
+                            log::warn!("Failed to send metrics: send timeout")
+                        }
+                    }
+                })
                 .await;
         }
     }
@@ -191,7 +198,7 @@ fn count_option_vec<T>(vs: &Option<Vec<T>>) -> usize {
 
 const MAX_CW_METRICS_PUT_SIZE: usize = 40_000;
 
-fn metrics_chunks(mut metrics: &[MetricDatum]) -> impl Iterator<Item = Vec<MetricDatum>> + '_ {
+fn metrics_chunks(mut metrics: &[MetricDatum]) -> impl Iterator<Item = &[MetricDatum]> + '_ {
     std::iter::from_fn(move || {
         let mut split = 0;
 
@@ -214,7 +221,7 @@ fn metrics_chunks(mut metrics: &[MetricDatum]) -> impl Iterator<Item = Vec<Metri
         if chunk.is_empty() {
             None
         } else {
-            Some(chunk.to_owned())
+            Some(chunk)
         }
     })
 }
@@ -523,11 +530,14 @@ mod tests {
         proptest! {
             proptest::prelude::ProptestConfig { cases: 30, .. Default::default() },
             |(metrics in metrics())| {
+                let mut total_chunks = 0;
                 for metric_data in metrics_chunks(&metrics) {
                     assert!(metric_data.len() > 0 && metric_data.len() < MAX_CW_METRICS_PER_CALL, "Sending too many metrics per call: {}", metric_data.len());
                     let estimated_size = metric_data.iter().map(metric_size).sum::<usize>();
                     assert!(estimated_size < MAX_CW_METRICS_PUT_SIZE, "{} >= {}", estimated_size, MAX_CW_METRICS_PUT_SIZE);
+                    total_chunks += metric_data.len();
                 }
+                assert_eq!(total_chunks, metrics.len());
             }
         }
     }
