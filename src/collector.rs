@@ -178,15 +178,64 @@ fn mk_emitter(
             }
         };
         while let Some(metrics) = emit_receiver.next().await {
-            future::join_all(
-                metrics
-                    .chunks(MAX_CW_METRICS_PER_CALL)
-                    .map(|metrics_chunk| put(metrics_chunk.to_owned())),
-            )
-            .map(|_| ())
-            .await;
+            future::join_all(metrics_chunks(&metrics).map(put))
+                .map(|_| ())
+                .await;
         }
     }
+}
+
+fn count_option_vec<T>(vs: &Option<Vec<T>>) -> usize {
+    vs.as_ref().map(|vs| vs.len()).unwrap_or(0)
+}
+
+const MAX_CW_METRICS_PUT_SIZE: usize = 40_000;
+
+fn metrics_chunks(mut metrics: &[MetricDatum]) -> impl Iterator<Item = Vec<MetricDatum>> + '_ {
+    std::iter::from_fn(move || {
+        let mut split = 0;
+
+        let mut current_len = 0;
+        // PutMetricData uses this really high overhead format so just take a high estimate of that.
+        //
+        // Assumes each value sent is ~60 bytes
+        // ```
+        // MetricData.member.2.Dimensions.member.2.Value=m1.small
+        // ```
+        for (i, metric) in metrics.iter().take(MAX_CW_METRICS_PER_CALL).enumerate() {
+            current_len += metric_size(metric);
+            if current_len > MAX_CW_METRICS_PUT_SIZE {
+                break;
+            }
+            split = i + 1;
+        }
+        let (chunk, rest) = metrics.split_at(split);
+        metrics = rest;
+        if chunk.is_empty() {
+            None
+        } else {
+            Some(chunk.to_owned())
+        }
+    })
+}
+
+fn metric_size(metric: &MetricDatum) -> usize {
+    let MetricDatum {
+        counts,
+        values,
+        dimensions,
+        // 6 fields
+        metric_name: _,
+        statistic_values: _,
+        storage_resolution: _,
+        timestamp: _,
+        unit: _,
+        value: _,
+    } = metric;
+    60 * (
+        // The 6 non Vec fields
+        6 + count_option_vec(values) + count_option_vec(counts) + count_option_vec(dimensions)
+    )
 }
 
 fn mk_send_batch_timer(
@@ -431,9 +480,55 @@ impl Resolution {
 mod tests {
     use super::*;
 
+    use proptest::prelude::*;
+
     #[test]
     fn time_key_should_truncate() {
         assert_eq!(time_key(370, Resolution::Second), 370);
         assert_eq!(time_key(370, Resolution::Minute), 360);
+    }
+
+    fn metrics() -> impl Strategy<Value = Vec<MetricDatum>> {
+        let values = || {
+            proptest::collection::vec(proptest::num::f64::ANY, 1..MAX_HISTOGRAM_VALUES)
+                .prop_map(Some)
+        };
+        let timestamp = timestamp_string(time::UNIX_EPOCH);
+        let datum = (
+            values(),
+            values(),
+            proptest::collection::vec(
+                ("name", "value").prop_map(|(name, value)| Dimension { name, value }),
+                1..6,
+            )
+            .prop_map(Some),
+        )
+            .prop_map(move |(counts, values, dimensions)| MetricDatum {
+                counts,
+                values,
+                dimensions,
+                metric_name: "test".into(),
+                statistic_values: Some(StatisticSet::default()),
+                storage_resolution: Some(1),
+                timestamp: Some(timestamp.clone()),
+                value: Some(1.0),
+                unit: Some("Count".into()),
+            });
+
+        proptest::collection::vec(datum, 1..100)
+    }
+
+    #[test]
+    fn chunks_fit_in_cloudwatch_constraints() {
+        proptest! {
+            proptest::prelude::ProptestConfig { cases: 30, .. Default::default() },
+            |(metrics in metrics())| {
+                for metric_data in metrics_chunks(&metrics) {
+                    assert!(metric_data.len() > 0 && metric_data.len() < MAX_CW_METRICS_PER_CALL, "Sending too many metrics per call: {}", metric_data.len());
+                    let estimated_size = metric_data.iter().map(metric_size).sum::<usize>();
+                    assert!(estimated_size < MAX_CW_METRICS_PUT_SIZE, "{} >= {}", estimated_size, MAX_CW_METRICS_PUT_SIZE);
+                }
+            }
+        }
     }
 }
