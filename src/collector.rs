@@ -28,8 +28,7 @@ pub struct Config {
     pub default_dimensions: BTreeMap<String, String>,
     pub storage_resolution: Resolution,
     pub send_interval_secs: u64,
-    pub region: Region,
-    pub client_builder: ClientBuilder,
+    pub client: Box<dyn CloudWatch + Send + Sync>,
     pub shutdown_signal: future::Shared<BoxFuture<'static, ()>>,
 }
 
@@ -129,7 +128,8 @@ pub fn new(config: Config) -> (RecorderHandle, impl Future<Output = ()>) {
         )
         .take_until(config.shutdown_signal.clone().map(|_| true)),
     );
-    let emitter = mk_emitter(emit_receiver, &config);
+
+    let emitter = mk_emitter(emit_receiver, config.client, config.cloudwatch_namespace);
 
     let internal_config = CollectorConfig {
         default_dimensions: config.default_dimensions,
@@ -157,11 +157,9 @@ pub fn new(config: Config) -> (RecorderHandle, impl Future<Output = ()>) {
 
 fn mk_emitter(
     mut emit_receiver: mpsc::Receiver<Vec<MetricDatum>>,
-    config: &Config,
+    cloudwatch_client: Box<dyn CloudWatch + Send + Sync>,
+    cloudwatch_namespace: String,
 ) -> impl Future<Output = ()> {
-    let cloudwatch_client = (config.client_builder)(config.region.clone());
-    let cloudwatch_namespace = config.cloudwatch_namespace.clone();
-
     async move {
         let put = |metric_data| {
             let cloudwatch_namespace = cloudwatch_namespace.clone();

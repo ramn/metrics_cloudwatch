@@ -1,7 +1,7 @@
 use std::{error::Error, time::Duration};
 
 use futures::prelude::*;
-use rusoto_cloudwatch::{CloudWatch, StatisticSet};
+use rusoto_cloudwatch::StatisticSet;
 
 use common::MockCloudWatchClient;
 
@@ -10,17 +10,13 @@ mod common;
 #[tokio::test]
 async fn test_flush_on_shutdown() -> Result<(), Box<dyn Error>> {
     let client = MockCloudWatchClient::default();
-    let client_builder = {
-        let client = client.clone();
-        Box::new(move |_region| Box::new(client.clone()) as Box<dyn CloudWatch + Send + Sync>)
-    };
 
     tokio::time::pause();
     let (tx, rx) = tokio::sync::oneshot::channel();
     let backend_fut = Box::pin(
         metrics_cloudwatch::builder()
             .cloudwatch_namespace("test-ns")
-            .client_builder(client_builder)
+            .client(Box::new(client.clone()))
             .send_interval_secs(1)
             .storage_resolution(metrics_cloudwatch::Resolution::Second)
             .shutdown_signal(Box::pin(rx.map(|_| ())))
