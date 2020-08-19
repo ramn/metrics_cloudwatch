@@ -196,7 +196,7 @@ fn count_option_vec<T>(vs: &Option<Vec<T>>) -> usize {
     vs.as_ref().map(|vs| vs.len()).unwrap_or(0)
 }
 
-const MAX_CW_METRICS_PUT_SIZE: usize = 40_000;
+const MAX_CW_METRICS_PUT_SIZE: usize = 37_000; // Docs say 40k but we set our max lower to be safe since we only have a heuristic
 
 fn metrics_chunks(mut metrics: &[MetricDatum]) -> impl Iterator<Item = &[MetricDatum]> + '_ {
     std::iter::from_fn(move || {
