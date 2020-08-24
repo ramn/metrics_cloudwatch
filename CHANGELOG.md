@@ -1,3 +1,9 @@
+0.7.0
+-----
+* Pack metrics to be sent to CloudWatch more efficiently, to avoid hitting AWS
+rate limiting
+* Simplify how a CloudWatch Client is passed to the builder
+
 0.6.0
 -----
 * Change: the reported min and max values of a counter is now set as equal to
