@@ -29,11 +29,7 @@ fn simple(c: &mut Criterion) {
                         default_dimensions: Default::default(),
                         storage_resolution: collector::Resolution::Second,
                         send_interval_secs: 200,
-                        region: rusoto_core::Region::UsEast1,
-                        client_builder: {
-                            let cloudwatch_client = cloudwatch_client.clone();
-                            Box::new(move |_| Box::new(cloudwatch_client.clone()))
-                        },
+                        client: Box::new(cloudwatch_client.clone()),
                         shutdown_signal: receiver.map(|_| ()).boxed().shared(),
                     });
 

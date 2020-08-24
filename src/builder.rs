@@ -1,11 +1,10 @@
 use std::{collections::BTreeMap, fmt};
 
 use futures::{future, prelude::*};
-use rusoto_cloudwatch::CloudWatchClient;
-use rusoto_core::Region;
+use rusoto_cloudwatch::{CloudWatch, CloudWatchClient};
 
 use crate::{
-    collector::{self, ClientBuilder, Config, Resolution},
+    collector::{self, Config, Resolution},
     error::Error,
     BoxFuture,
 };
@@ -16,8 +15,7 @@ pub struct Builder {
     default_dimensions: BTreeMap<String, String>,
     storage_resolution: Option<Resolution>,
     send_interval_secs: Option<u64>,
-    region: Option<Region>,
-    client_builder: Option<ClientBuilder>,
+    client: Option<Box<dyn CloudWatch + Send + Sync>>,
     shutdown_signal: Option<BoxFuture<'static, ()>>,
 }
 
@@ -25,8 +23,8 @@ pub fn builder() -> Builder {
     Builder::default()
 }
 
-fn default_client_builder() -> ClientBuilder {
-    Box::new(|region| Box::new(CloudWatchClient::new(region)))
+fn default_client() -> Box<dyn CloudWatch + Send + Sync> {
+    Box::new(CloudWatchClient::new(rusoto_core::Region::UsEast1))
 }
 
 fn extract_namespace(cloudwatch_namespace: Option<String>) -> Result<String, Error> {
@@ -70,18 +68,10 @@ impl Builder {
         }
     }
 
-    /// Sets the AWS Region to send metrics to
-    pub fn region(self, region: Region) -> Self {
+    /// Sets the cloudwatch client to be used to send metrics.
+    pub fn client(self, client: Box<dyn CloudWatch + Send + Sync>) -> Self {
         Self {
-            region: Some(region),
-            ..self
-        }
-    }
-
-    /// Sets a closure that can produce a CloudWatch client.
-    pub fn client_builder(self, client_builder: ClientBuilder) -> Self {
-        Self {
-            client_builder: Some(client_builder),
+            client: Some(client),
             ..self
         }
     }
@@ -112,8 +102,7 @@ impl Builder {
             default_dimensions: self.default_dimensions,
             storage_resolution: self.storage_resolution.unwrap_or(Resolution::Minute),
             send_interval_secs: self.send_interval_secs.unwrap_or(10),
-            region: self.region.unwrap_or(Region::UsEast1),
-            client_builder: self.client_builder.unwrap_or_else(default_client_builder),
+            client: self.client.unwrap_or_else(default_client),
             shutdown_signal: self
                 .shutdown_signal
                 .unwrap_or_else(|| Box::pin(future::pending()))
@@ -129,8 +118,7 @@ impl fmt::Debug for Builder {
             default_dimensions,
             storage_resolution,
             send_interval_secs,
-            region,
-            client_builder: _,
+            client: _,
             shutdown_signal: _,
         } = self;
         f.debug_struct("Builder")
@@ -138,8 +126,7 @@ impl fmt::Debug for Builder {
             .field("default_dimensions", default_dimensions)
             .field("storage_resolution", storage_resolution)
             .field("send_interval_secs", send_interval_secs)
-            .field("region", region)
-            .field("client_builder", &"<Fn(Region) -> Box<dyn CloudWatch>")
+            .field("client", &"Box<dyn CloudWatch>")
             .field("shutdown_signal", &"BoxFuture")
             .finish()
     }

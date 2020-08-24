@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc f2f1f305bb977e8c11934e09f536b2dc0b4450310a485985363f918a71c452f6 # shrinks to metrics = [MetricDatum { counts: Some([0.0]), dimensions: Some([Dimension { name: "name", value: "value" }]), metric_name: "test", statistic_values: Some(StatisticSet { maximum: 0.0, minimum: 0.0, sample_count: 0.0, sum: 0.0 }), storage_resolution: Some(1), timestamp: Some("1970-01-01T00:00:00.000Z"), unit: Some("Count"), value: Some(1.0), values: Some([0.0]) }]
