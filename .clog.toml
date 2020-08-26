@@ -1,0 +1,6 @@
+[clog]
+repository = "https://github.com/ramn/metrics_cloudwatch"
+
+changelog = "CHANGELOG.md"
+
+from-latest-tag = true
