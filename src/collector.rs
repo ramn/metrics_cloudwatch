@@ -241,13 +241,34 @@ fn metric_size(metric: &MetricDatum) -> usize {
     )
 }
 
+fn jitter_interval_at(
+    start: tokio::time::Instant,
+    interval: Duration,
+) -> impl Stream<Item = tokio::time::Instant> {
+    use rand::{rngs::SmallRng, Rng, SeedableRng};
+
+    let rng = SmallRng::from_rng(rand::thread_rng()).unwrap();
+    let variance = 0.1;
+    let interval_secs = interval.as_secs_f64();
+    let min = Duration::from_secs_f64(interval_secs * (1.0 - variance));
+    let max = Duration::from_secs_f64(interval_secs * (1.0 + variance));
+
+    let delay = tokio::time::delay_until(start);
+    stream::unfold((rng, delay), move |(mut rng, mut delay)| async move {
+        (&mut delay).await;
+        let now = delay.deadline();
+        delay.reset(now + rng.gen_range(min, max));
+        Some((now, (rng, delay)))
+    })
+}
+
 fn mk_send_batch_timer(
     emit_sender: mpsc::Sender<Vec<MetricDatum>>,
     config: &Config,
 ) -> impl Stream<Item = Message> {
     let interval = Duration::from_secs(config.send_interval_secs);
     let storage_resolution = config.storage_resolution;
-    tokio::time::interval_at(tokio::time::Instant::now(), interval).map(move |_instant| {
+    jitter_interval_at(tokio::time::Instant::now(), interval).map(move |_instant| {
         let send_all_before = time_key(current_timestamp(), storage_resolution) - 1;
         Message::SendBatch {
             send_all_before,
@@ -606,6 +627,36 @@ mod tests {
                     value: "123".into()
                 },
             ],
+        );
+    }
+
+    macro_rules! assert_between {
+        ($x: expr, $min: expr, $max: expr, $(,)?) => {
+            match ($x, $min, $max) {
+                (x, min, max) => {
+                    assert!(
+                        x > min && x < max,
+                        "{:?} is not in the range {:?}..{:?}",
+                        x,
+                        min,
+                        max
+                    );
+                }
+            }
+        };
+    }
+
+    #[tokio::test]
+    async fn jitter_interval_test() {
+        let interval = Duration::from_millis(10);
+        let start = tokio::time::Instant::now();
+        let mut interval_stream = Box::pin(jitter_interval_at(start, interval));
+        assert_eq!(interval_stream.next().await, Some(start));
+        let x = interval_stream.next().await.unwrap();
+        assert_between!(
+            x,
+            start.checked_add(interval / 2).unwrap(),
+            start.checked_add(interval + interval / 2).unwrap(),
         );
     }
 }
