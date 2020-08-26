@@ -164,7 +164,7 @@ async fn mk_emitter(
     let cloudwatch_namespace = &cloudwatch_namespace;
     while let Some(metrics) = emit_receiver.next().await {
         stream::iter(metrics_chunks(&metrics))
-            .for_each_concurrent(None, |metric_data| async move {
+            .for_each(|metric_data| async move {
                 let send_fut = cloudwatch_client.put_metric_data(PutMetricDataInput {
                     metric_data: metric_data.to_owned(),
                     namespace: cloudwatch_namespace.clone(),
