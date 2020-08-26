@@ -1,3 +1,7 @@
+0.8.0
+-----
+* Allow explicit dimensions to override defaults
+
 0.7.0
 -----
 * Pack metrics to be sent to CloudWatch more efficiently, to avoid hitting AWS
