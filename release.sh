@@ -2,7 +2,7 @@
 set -ex
 # Usage: ./release.sh patch/minor/major VERSION
 
-
+cargo install clog-cli && cargo install cargo-release
 
 LEVEL=$1
 VERSION=$2
