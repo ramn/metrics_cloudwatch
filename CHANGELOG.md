@@ -1,3 +1,17 @@
+<a name="0.8.1"></a>
+### 0.8.1 (2020-08-26)
+
+
+#### Features
+
+*   Add some jitter to the send interval ([cea37c14](https://github.com/ramn/metrics_cloudwatch/commit/cea37c14c5dc814da802d50608b16d428e2a84ae))
+
+#### Bug Fixes
+
+*   Try to avoid throttling by sending chunks one-by-one ([d6e26e34](https://github.com/ramn/metrics_cloudwatch/commit/d6e26e34acf6c3bd227a8a9326a86f04da79d1d0))
+
+
+
 0.8.0
 -----
 * Allow explicit dimensions to override defaults

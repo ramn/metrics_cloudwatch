@@ -1,6 +1,6 @@
 [package]
 name = "metrics_cloudwatch"
-version = "0.8.0"
+version = "0.8.1"
 authors = ["ramn <github@rymdimperiet.org>"]
 edition = "2018"
 
@@ -19,6 +19,7 @@ chrono = "0.4.13"
 futures = "0.3.5"
 log = "0.4.11"
 metrics = { version = "0.12.1", features = ["std"] }
+rand = { version = "0.7", default-features = false, features = ["small_rng"] }
 rusoto_cloudwatch = "0.45"
 rusoto_core = "0.45"
 serde_json = "1"
