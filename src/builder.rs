@@ -1,7 +1,7 @@
 use std::{collections::BTreeMap, fmt};
 
 use futures::{future, prelude::*};
-use rusoto_cloudwatch::{CloudWatch, CloudWatchClient};
+use rusoto_cloudwatch::CloudWatch;
 
 use crate::{
     collector::{self, Config, Resolution},
@@ -9,22 +9,17 @@ use crate::{
     BoxFuture,
 };
 
-#[derive(Default)]
 pub struct Builder {
     cloudwatch_namespace: Option<String>,
     default_dimensions: BTreeMap<String, String>,
     storage_resolution: Option<Resolution>,
     send_interval_secs: Option<u64>,
-    client: Option<Box<dyn CloudWatch + Send + Sync>>,
+    client: Box<dyn CloudWatch + Send + Sync>,
     shutdown_signal: Option<BoxFuture<'static, ()>>,
 }
 
-pub fn builder() -> Builder {
-    Builder::default()
-}
-
-fn default_client() -> Box<dyn CloudWatch + Send + Sync> {
-    Box::new(CloudWatchClient::new(rusoto_core::Region::UsEast1))
+pub fn builder(client: impl CloudWatch + Send + Sync + 'static) -> Builder {
+    Builder::new(client)
 }
 
 fn extract_namespace(cloudwatch_namespace: Option<String>) -> Result<String, Error> {
@@ -37,6 +32,17 @@ fn extract_namespace(cloudwatch_namespace: Option<String>) -> Result<String, Err
 }
 
 impl Builder {
+    pub fn new(client: impl CloudWatch + Send + Sync + 'static) -> Self {
+        Builder {
+            cloudwatch_namespace: Default::default(),
+            default_dimensions: Default::default(),
+            storage_resolution: Default::default(),
+            send_interval_secs: Default::default(),
+            client: Box::new(client),
+            shutdown_signal: Default::default(),
+        }
+    }
+
     /// Sets the CloudWatch namespace for all metrics sent by this backend.
     pub fn cloudwatch_namespace(self, namespace: impl Into<String>) -> Self {
         Self {
@@ -70,10 +76,7 @@ impl Builder {
 
     /// Sets the cloudwatch client to be used to send metrics.
     pub fn client(self, client: Box<dyn CloudWatch + Send + Sync>) -> Self {
-        Self {
-            client: Some(client),
-            ..self
-        }
+        Self { client, ..self }
     }
 
     /// Sets a future that acts as a shutdown signal when it completes.
@@ -102,7 +105,7 @@ impl Builder {
             default_dimensions: self.default_dimensions,
             storage_resolution: self.storage_resolution.unwrap_or(Resolution::Minute),
             send_interval_secs: self.send_interval_secs.unwrap_or(10),
-            client: self.client.unwrap_or_else(default_client),
+            client: self.client,
             shutdown_signal: self
                 .shutdown_signal
                 .unwrap_or_else(|| Box::pin(future::pending()))
