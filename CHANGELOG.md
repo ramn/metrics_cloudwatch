@@ -1,3 +1,13 @@
+<a name="0.8.2"></a>
+### 0.8.2 (2020-09-11)
+
+
+#### Bug Fixes
+
+*   Display averages for count metrics ([8bfccb7e](https://github.com/ramn/metrics_cloudwatch/commit/8bfccb7e27b9cff802045a16756fe5a051fae638))
+
+
+
 <a name="0.8.1"></a>
 ### 0.8.1 (2020-08-26)
 
