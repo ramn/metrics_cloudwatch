@@ -418,7 +418,10 @@ impl Collector {
                 if counter.sample_count > 0 {
                     let sum = counter.sum as f64;
                     let stats_set = StatisticSet {
-                        sample_count: counter.sample_count as f64,
+                        // We aren't interested in how many `counter!` calls we did so we put 1
+                        // here to allow cloudwatch to display the average between this and any
+                        // other instances posting to the same metric.
+                        sample_count: 1.0,
                         sum,
                         // Max and min for a count can either be the sum or the max/min of the
                         // value passed to each `increment_counter` call.

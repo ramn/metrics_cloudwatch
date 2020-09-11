@@ -59,7 +59,7 @@ fn simple(c: &mut Criterion) {
                             .iter()
                             .flat_map(|m| m.metric_data.iter())
                             .filter(|data| data.metric_name == "counter")
-                            .map(|counter| counter.statistic_values.as_ref().unwrap().sample_count)
+                            .map(|counter| counter.statistic_values.as_ref().unwrap().sum)
                             .sum::<f64>(),
                         (NUM_ENTRIES as f64 / 3.0).round(),
                         "{:#?}",
