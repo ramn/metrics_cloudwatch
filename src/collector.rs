@@ -485,12 +485,14 @@ impl Collector {
         Ok(())
     }
 
-    fn default_dimensions(&self) -> impl Iterator<Item = Dimension> {
+    fn default_dimensions(&self) -> impl Iterator<Item = Dimension> + '_ {
         self.config
             .default_dimensions
-            .clone()
-            .into_iter()
-            .map(|(name, value)| Dimension { name, value })
+            .iter()
+            .map(|(name, value)| Dimension {
+                name: name.to_owned(),
+                value: value.to_owned(),
+            })
     }
 }
 
