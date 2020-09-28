@@ -348,6 +348,7 @@ impl Collector {
     fn dimensions(&self, key: &Key) -> Vec<Dimension> {
         let mut dimensions_from_keys = key
             .labels()
+            .filter(|l| !l.key().starts_with('@'))
             .map(|l| Dimension {
                 name: l.key().to_owned(),
                 value: l.value().to_owned(),
@@ -404,14 +405,15 @@ impl Collector {
                     histogram,
                 } = aggregate;
                 let dimensions = self.dimensions(&key);
+                let unit = key.labels().find(|l| l.key() == "@unit").map(|l| l.value());
 
-                let stats_set_datum = &mut |stats_set, unit| MetricDatum {
+                let stats_set_datum = &mut |stats_set, unit: Option<&str>| MetricDatum {
                     dimensions: Some(dimensions.clone()),
                     metric_name: key.name().into_owned(),
                     timestamp: Some(timestamp.clone()),
                     storage_resolution: Some(self.config.storage_resolution.as_secs()),
                     statistic_values: Some(stats_set),
-                    unit,
+                    unit: unit.map(|s| s.into()),
                     ..Default::default()
                 };
 
@@ -440,10 +442,10 @@ impl Collector {
                         maximum: sum,
                         minimum: sum,
                     };
-                    metrics_batch.push(stats_set_datum(stats_set, Some("Count".to_owned())));
+                    metrics_batch.push(stats_set_datum(stats_set, unit.or_else(|| Some("Count"))));
                 }
                 if gauge.sample_count > 0.0 {
-                    metrics_batch.push(stats_set_datum(gauge, None));
+                    metrics_batch.push(stats_set_datum(gauge, unit));
                 }
 
                 let histogram_datum = &mut |Histogram { values, counts }, unit| MetricDatum {
@@ -474,7 +476,7 @@ impl Collector {
                         if histogram.values.is_empty() {
                             break;
                         };
-                        metrics_batch.push(histogram_datum(histogram, None));
+                        metrics_batch.push(histogram_datum(histogram, unit.map(|s| s.into())));
                     }
                 }
             }
