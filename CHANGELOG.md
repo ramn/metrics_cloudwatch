@@ -1,3 +1,21 @@
+<a name="v0.9.0"></a>
+## v0.9.0 (2020-09-28)
+
+
+#### Features
+
+*   Add support for specifying cloudwatch units ([130aecf9](https://github.com/ramn/metrics_cloudwatch/commit/130aecf9e7e3b5f24a6ed89fa2adbacdab620ee6))
+
+#### Performance
+
+*   Don't clone the default_dimensions btree ([045dc7b3](https://github.com/ramn/metrics_cloudwatch/commit/045dc7b3eed249f840da0af8786f9dd4d6dd1b78))
+
+#### Bug Fixes
+
+*   Don't assume a default region/client ([58b4aed2](https://github.com/ramn/metrics_cloudwatch/commit/58b4aed2c4d069b0968be64f870c54ec8670feaa))
+
+
+
 <a name="0.8.2"></a>
 ### 0.8.2 (2020-09-11)
 
