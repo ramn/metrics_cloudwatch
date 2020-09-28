@@ -18,8 +18,8 @@ pub struct Builder {
     shutdown_signal: Option<BoxFuture<'static, ()>>,
 }
 
-pub fn builder(client: impl CloudWatch + Send + Sync + 'static) -> Builder {
-    Builder::new(client)
+pub fn builder(region: rusoto_core::Region) -> Builder {
+    Builder::new(region)
 }
 
 fn extract_namespace(cloudwatch_namespace: Option<String>) -> Result<String, Error> {
@@ -32,7 +32,11 @@ fn extract_namespace(cloudwatch_namespace: Option<String>) -> Result<String, Err
 }
 
 impl Builder {
-    pub fn new(client: impl CloudWatch + Send + Sync + 'static) -> Self {
+    pub fn new(region: rusoto_core::Region) -> Self {
+        Self::new_with(rusoto_cloudwatch::CloudWatchClient::new(region))
+    }
+
+    pub fn new_with(client: impl CloudWatch + Send + Sync + 'static) -> Self {
         Builder {
             cloudwatch_namespace: Default::default(),
             default_dimensions: Default::default(),
