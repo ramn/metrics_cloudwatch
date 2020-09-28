@@ -31,6 +31,8 @@ async fn test_flush_on_shutdown() -> Result<(), Box<dyn Error>> {
     }
     metrics::value!("test", 0);
     metrics::value!("test", 200);
+    metrics::value!("labels", 111, "label" => "1", "@unknown_@_label_is_skipped" => "abc");
+    metrics::value!("bytes", 200, "@unit" => metrics_cloudwatch::Unit::Bytes);
     tokio::time::advance(Duration::from_millis(5)).await;
 
     // Send shutdown signal
@@ -40,26 +42,38 @@ async fn test_flush_on_shutdown() -> Result<(), Box<dyn Error>> {
     let actual = client.put_metric_data.lock().await;
     assert_eq!(actual.len(), 1);
 
-    assert_eq!(actual[0].metric_data.len(), 3);
-    eprintln!("{:#?}", actual[0]);
-    let value_metric = actual[0]
-        .metric_data
+    let metric_data = &actual[0].metric_data;
+
+    assert_eq!(metric_data.len(), 5);
+    let value_metric = metric_data
         .iter()
         .find(|m| m.metric_name == "test" && m.counts.as_ref().unwrap().len() == 150)
         .unwrap();
     assert_eq!(value_metric.counts.as_ref().unwrap().len(), 150);
     assert_eq!(value_metric.values.as_ref().unwrap().len(), 150);
+    assert_eq!(value_metric.dimensions, Some(vec![]));
 
-    let count_metric = actual[0]
-        .metric_data
+    let dim_metric = metric_data
+        .iter()
+        .find(|m| m.metric_name == "labels")
+        .unwrap();
+    assert_eq!(
+        dim_metric.dimensions,
+        Some(vec![rusoto_cloudwatch::Dimension {
+            name: "label".into(),
+            value: "1".into()
+        }])
+    );
+
+    let count_metric = metric_data
         .iter()
         .find(|m| m.metric_name == "test" && m.counts.as_ref().unwrap().len() == 1)
         .unwrap();
     assert_eq!(count_metric.counts.as_ref().unwrap().len(), 1);
     assert_eq!(count_metric.values.as_ref().unwrap().len(), 1);
+    assert_eq!(value_metric.dimensions, Some(vec![]));
 
-    let count_data = actual[0]
-        .metric_data
+    let count_data = metric_data
         .iter()
         .find(|m| m.metric_name == "count")
         .unwrap();
@@ -72,5 +86,12 @@ async fn test_flush_on_shutdown() -> Result<(), Box<dyn Error>> {
             minimum: 150.0
         })
     );
+
+    let bytes_data = metric_data
+        .iter()
+        .find(|m| m.metric_name == "bytes")
+        .unwrap();
+    assert_eq!(bytes_data.unit, Some("Bytes".to_string()));
+
     Ok(())
 }
