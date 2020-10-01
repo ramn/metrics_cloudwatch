@@ -21,7 +21,6 @@ type Timestamp = u64;
 const MAX_CW_METRICS_PER_CALL: usize = 20;
 const MAX_CLOUDWATCH_DIMENSIONS: usize = 10;
 const MAX_HISTOGRAM_VALUES: usize = 150;
-const SEND_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub struct Config {
     pub cloudwatch_namespace: String,
@@ -129,7 +128,12 @@ pub fn new(config: Config) -> (RecorderHandle, impl Future<Output = ()>) {
         .take_until(config.shutdown_signal.clone().map(|_| true)),
     );
 
-    let emitter = mk_emitter(emit_receiver, config.client, config.cloudwatch_namespace);
+    let emitter = mk_emitter(
+        emit_receiver,
+        config.client,
+        config.cloudwatch_namespace,
+        config.send_interval_secs,
+    );
 
     let internal_config = CollectorConfig {
         default_dimensions: config.default_dimensions,
@@ -156,35 +160,112 @@ pub fn new(config: Config) -> (RecorderHandle, impl Future<Output = ()>) {
 }
 
 async fn mk_emitter(
-    mut emit_receiver: mpsc::Receiver<Vec<MetricDatum>>,
+    emit_receiver: mpsc::Receiver<Vec<MetricDatum>>,
     cloudwatch_client: Box<dyn CloudWatch + Send + Sync>,
     cloudwatch_namespace: String,
+    send_interval_secs: u64,
 ) {
-    let cloudwatch_client = &cloudwatch_client;
+    let cloudwatch_client = &*cloudwatch_client;
     let cloudwatch_namespace = &cloudwatch_namespace;
-    while let Some(metrics) = emit_receiver.next().await {
-        stream::iter(metrics_chunks(&metrics))
-            .for_each(|metric_data| async move {
-                let send_fut = cloudwatch_client.put_metric_data(PutMetricDataInput {
-                    metric_data: metric_data.to_owned(),
-                    namespace: cloudwatch_namespace.clone(),
-                });
-                match tokio::time::timeout(SEND_TIMEOUT, send_fut).await {
-                    Ok(Ok(())) => log::debug!("Successfully sent a metrics batch to CloudWatch."),
-                    Ok(Err(e)) => log::warn!(
-                        "Failed to send metrics: {:?}: {}",
-                        metric_data
-                            .iter()
-                            .map(|m| &m.metric_name)
-                            .collect::<Vec<_>>(),
-                        e,
-                    ),
-                    Err(tokio::time::Elapsed { .. }) => {
-                        log::warn!("Failed to send metrics: send timeout")
+    // Give each batch twice the interval length to get the metrics sent out
+    // This should allow the batch to be sent for short network problems. If there is a larger
+    // issue we buffer up to 5 batches before we start dropping old ones.
+    let send_timeout = Duration::from_secs(send_interval_secs) * 2;
+    buffered_sender(emit_receiver, |metrics| {
+        send_metrics(
+            cloudwatch_client,
+            send_timeout,
+            cloudwatch_namespace,
+            metrics,
+        )
+    })
+    .await;
+}
+
+async fn buffered_sender<T, F>(
+    mut receiver: impl Stream<Item = T> + std::marker::Unpin,
+    mut send: impl FnMut(T) -> F,
+) where
+    F: Future<Output = ()>,
+{
+    let mut buffer = std::collections::VecDeque::new();
+    let mut send_future = future::Either::Left(future::pending());
+    loop {
+        tokio::select! {
+            metrics = receiver.next() => {
+                if let Some(metrics) = metrics {
+                    if let future::Either::Left(_) = send_future {
+                        // Start sending the oldest metric
+                        let metrics = if let Some(old_metrics) = buffer.pop_back() {
+                            buffer.push_front(metrics);
+                            old_metrics
+                        } else {
+                            metrics
+                        };
+                        send_future =
+                            future::Either::Right(Box::pin(send(metrics)));
+                    } else {
+                        // Currently sending metrics, buffer this one, dropping the oldest metrics if we
+                        // do not have room
+                        if buffer.len() >= 5 {
+                            buffer.truncate(4);
+                        }
+                        buffer.push_front(metrics);
                     }
+                } else {
+                    break;
                 }
-            })
-            .await;
+            }
+            _ = &mut send_future => {
+                // Done sending the metric, pick the oldest one to send next
+                send_future = if let Some(metrics) = buffer.pop_back() {
+                    future::Either::Right(Box::pin(send(metrics)))
+                } else {
+                    future::Either::Left(future::pending())
+                };
+            }
+        }
+    }
+    // Finish the currently sent metric
+    if let future::Either::Right(send_future) = send_future {
+        send_future.await;
+    }
+    // Drain any remaining metrics
+    for metrics in buffer.into_iter().rev() {
+        send(metrics).await;
+    }
+}
+
+async fn send_metrics(
+    cloudwatch_client: &(dyn CloudWatch + Send + Sync),
+    send_timeout: Duration,
+    cloudwatch_namespace: &str,
+    metrics: Vec<MetricDatum>,
+) {
+    let result = tokio::time::timeout(
+        send_timeout,
+        stream::iter(metrics_chunks(&metrics)).for_each(|metric_data| async move {
+            let send_fut = cloudwatch_client.put_metric_data(PutMetricDataInput {
+                metric_data: metric_data.to_owned(),
+                namespace: cloudwatch_namespace.to_owned(),
+            });
+            match send_fut.await {
+                Ok(()) => log::debug!("Successfully sent a metrics batch to CloudWatch."),
+                Err(e) => log::warn!(
+                    "Failed to send metrics: {:?}: {}",
+                    metric_data
+                        .iter()
+                        .map(|m| &m.metric_name)
+                        .collect::<Vec<_>>(),
+                    e,
+                ),
+            }
+        }),
+    )
+    .await;
+    match result {
+        Ok(()) => (),
+        Err(tokio::time::Elapsed { .. }) => log::warn!("Failed to send metrics: send timeout"),
     }
 }
 
@@ -665,5 +746,38 @@ mod tests {
             start.checked_add(interval / 2).unwrap(),
             start.checked_add(interval + interval / 2).unwrap(),
         );
+    }
+
+    #[tokio::test]
+    async fn buffered_sender_test() {
+        let (mut tx, rx) = tokio::sync::mpsc::channel(100);
+        let (done_sending_tx, done_sending_rx) = tokio::sync::oneshot::channel();
+        let done_sending_rx = done_sending_rx.map(|_| ()).shared();
+        let done = &std::cell::RefCell::new(Vec::new());
+        futures::join!(
+            buffered_sender(rx, |i: i32| {
+                let done_sending_rx = done_sending_rx.clone();
+                async move {
+                    if i == 0 {
+                        // Simulate a long running while we are pushing more to the channel
+                        done_sending_rx.await;
+                    }
+                    assert!(i == 0 || i >= 15);
+                    done.borrow_mut().push(i);
+                }
+            }),
+            async {
+                for i in 0..20 {
+                    tx.send(i).await.unwrap();
+                    tokio::task::yield_now().await;
+                }
+                done_sending_tx.send(()).unwrap();
+                drop(tx);
+            }
+        );
+
+        // The first send took a long time but managed to finish, then we get the 5 elements in the
+        // buffer that completed normally
+        assert_eq!(*done.borrow(), [0, 15, 16, 17, 18, 19]);
     }
 }
