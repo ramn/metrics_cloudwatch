@@ -1,3 +1,13 @@
+<a name="v0.9.1"></a>
+### v0.9.1 (2020-10-05)
+
+
+#### Features
+
+*   Improve the send resilience of sends ([de08ce18](https://github.com/ramn/metrics_cloudwatch/commit/de08ce18f41389b26a26e4b43add9388d8f2398f))
+
+
+
 <a name="v0.9.0"></a>
 ## v0.9.0 (2020-09-28)
 
