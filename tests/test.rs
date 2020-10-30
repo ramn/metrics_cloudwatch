@@ -32,6 +32,8 @@ async fn test_flush_on_shutdown() -> Result<(), Box<dyn Error>> {
     metrics::value!("test", 200);
     metrics::value!("labels", 111, "label" => "1", "@unknown_@_label_is_skipped" => "abc");
     metrics::value!("bytes", 200, "@unit" => metrics_cloudwatch::Unit::Bytes);
+    metrics::gauge!("gauge", 100);
+    metrics::gauge!("gauge", 200);
     tokio::time::advance(Duration::from_millis(5)).await;
 
     // Send shutdown signal
@@ -43,7 +45,7 @@ async fn test_flush_on_shutdown() -> Result<(), Box<dyn Error>> {
 
     let metric_data = &actual[0].metric_data;
 
-    assert_eq!(metric_data.len(), 5);
+    assert_eq!(metric_data.len(), 6);
     let value_metric = metric_data
         .iter()
         .find(|m| m.metric_name == "test" && m.counts.as_ref().unwrap().len() == 150)
@@ -91,6 +93,20 @@ async fn test_flush_on_shutdown() -> Result<(), Box<dyn Error>> {
         .find(|m| m.metric_name == "bytes")
         .unwrap();
     assert_eq!(bytes_data.unit, Some("Bytes".to_string()));
+
+    let count_data = metric_data
+        .iter()
+        .find(|m| m.metric_name == "gauge")
+        .unwrap();
+    assert_eq!(
+        count_data.statistic_values,
+        Some(StatisticSet {
+            sample_count: 2.0,
+            sum: 300.0,
+            minimum: 100.0,
+            maximum: 200.0,
+        })
+    );
 
     Ok(())
 }
