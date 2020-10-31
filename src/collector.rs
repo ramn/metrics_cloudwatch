@@ -67,7 +67,7 @@ pub struct Counter {
 #[derive(Clone, Debug, Default)]
 struct Aggregate {
     counter: Counter,
-    gauge: StatisticSet,
+    gauge: Option<StatisticSet>,
     histogram: HashMap<HistogramValue, Count>,
 }
 
@@ -333,11 +333,22 @@ impl Collector {
             }
             Value::Gauge(value) => {
                 let value = value as f64;
-                let gauge = &mut aggregate.gauge;
-                gauge.sample_count += 1.0;
-                gauge.sum += value;
-                gauge.maximum = gauge.maximum.max(value);
-                gauge.minimum = gauge.minimum.min(value);
+                match &mut aggregate.gauge {
+                    Some(gauge) => {
+                        gauge.sample_count += 1.0;
+                        gauge.sum += value;
+                        gauge.maximum = gauge.maximum.max(value);
+                        gauge.minimum = gauge.minimum.min(value);
+                    }
+                    None => {
+                        aggregate.gauge = Some(StatisticSet {
+                            sample_count: 1.0,
+                            sum: value,
+                            maximum: value,
+                            minimum: value,
+                        });
+                    }
+                }
             }
             Value::Histogram(value) => {
                 *aggregate.histogram.entry(value).or_default() += 1;
@@ -444,7 +455,8 @@ impl Collector {
                     };
                     metrics_batch.push(stats_set_datum(stats_set, unit.or_else(|| Some("Count"))));
                 }
-                if gauge.sample_count > 0.0 {
+
+                if let Some(gauge) = gauge {
                     metrics_batch.push(stats_set_datum(gauge, unit));
                 }
 
