@@ -1,14 +1,16 @@
 use std::{
     collections::{BTreeMap, HashMap},
+    future::Future,
     mem, thread,
     time::{self, Duration, SystemTime},
 };
 
 use {
-    futures::{channel::mpsc, future, prelude::*, stream},
+    futures::{future, prelude::*, stream},
     metrics::{Key, Recorder},
     rusoto_cloudwatch::{CloudWatch, Dimension, MetricDatum, PutMetricDataInput, StatisticSet},
     rusoto_core::Region,
+    tokio::sync::mpsc,
 };
 
 use crate::{error::Error, BoxFuture};
@@ -97,9 +99,8 @@ pub struct RecorderHandle(mpsc::Sender<Datum>);
 
 pub fn init(config: Config) {
     let _ = thread::spawn(|| {
-        let mut runtime = tokio::runtime::Builder::new()
-            // single threaded
-            .basic_scheduler()
+        // single threaded
+        let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
@@ -119,11 +120,11 @@ pub async fn init_future(config: Config) -> Result<(), Error> {
 }
 
 pub fn new(config: Config) -> (RecorderHandle, impl Future<Output = ()>) {
-    let (collect_sender, collect_receiver) = mpsc::channel(1024);
+    let (collect_sender, mut collect_receiver) = mpsc::channel(1024);
     let (emit_sender, emit_receiver) = mpsc::channel(1024);
     let mut message_stream = Box::pin(
         stream::select(
-            collect_receiver.map(Message::Datum),
+            stream::poll_fn(move |cx| collect_receiver.poll_recv(cx)).map(Message::Datum),
             mk_send_batch_timer(emit_sender.clone(), &config),
         )
         .take_until(config.shutdown_signal.clone().map(|_| true)),
@@ -162,7 +163,7 @@ async fn mk_emitter(
 ) {
     let cloudwatch_client = &cloudwatch_client;
     let cloudwatch_namespace = &cloudwatch_namespace;
-    while let Some(metrics) = emit_receiver.next().await {
+    while let Some(metrics) = emit_receiver.recv().await {
         stream::iter(metrics_chunks(&metrics))
             .for_each(|metric_data| async move {
                 let send_fut = cloudwatch_client.put_metric_data(PutMetricDataInput {
@@ -179,7 +180,7 @@ async fn mk_emitter(
                             .collect::<Vec<_>>(),
                         e,
                     ),
-                    Err(tokio::time::Elapsed { .. }) => {
+                    Err(tokio::time::error::Elapsed { .. }) => {
                         log::warn!("Failed to send metrics: send timeout")
                     }
                 }
@@ -253,11 +254,11 @@ fn jitter_interval_at(
     let min = Duration::from_secs_f64(interval_secs * (1.0 - variance));
     let max = Duration::from_secs_f64(interval_secs * (1.0 + variance));
 
-    let delay = tokio::time::delay_until(start);
+    let delay = Box::pin(tokio::time::sleep_until(start));
     stream::unfold((rng, delay), move |(mut rng, mut delay)| async move {
         (&mut delay).await;
         let now = delay.deadline();
-        delay.reset(now + rng.gen_range(min, max));
+        delay.as_mut().reset(now + rng.gen_range(min, max));
         Some((now, (rng, delay)))
     })
 }
@@ -399,7 +400,7 @@ impl Collector {
     fn accept_send_batch(
         &mut self,
         send_all_before: Timestamp,
-        mut emit_sender: mpsc::Sender<Vec<MetricDatum>>,
+        emit_sender: mpsc::Sender<Vec<MetricDatum>>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut range = self.metrics_data.split_off(&send_all_before);
         mem::swap(&mut range, &mut self.metrics_data);
@@ -453,7 +454,7 @@ impl Collector {
                         maximum: sum,
                         minimum: sum,
                     };
-                    metrics_batch.push(stats_set_datum(stats_set, unit.or_else(|| Some("Count"))));
+                    metrics_batch.push(stats_set_datum(stats_set, unit.or(Some("Count"))));
                 }
 
                 if let Some(gauge) = gauge {
