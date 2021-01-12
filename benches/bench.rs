@@ -1,6 +1,6 @@
 use {
     criterion::{criterion_group, Benchmark, Criterion, Throughput},
-    futures::prelude::*,
+    futures_util::FutureExt,
     metrics::Recorder,
 };
 
@@ -14,8 +14,7 @@ fn simple(c: &mut Criterion) {
     c.bench(
         "send_metrics",
         Benchmark::new("full", |b| {
-            let mut runtime = tokio::runtime::Builder::new()
-                .basic_scheduler()
+            let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .unwrap();
