@@ -1,6 +1,6 @@
 use std::{error::Error, time::Duration};
 
-use futures::prelude::*;
+use futures_util::FutureExt;
 use rusoto_cloudwatch::StatisticSet;
 
 use common::MockCloudWatchClient;

@@ -6,7 +6,11 @@ use std::{
 };
 
 use {
-    futures::{future, prelude::*, stream},
+    futures_util::{
+        future,
+        stream::{self, Stream},
+        FutureExt, StreamExt,
+    },
     metrics::{Key, Recorder},
     rusoto_cloudwatch::{CloudWatch, Dimension, MetricDatum, PutMetricDataInput, StatisticSet},
     rusoto_core::Region,

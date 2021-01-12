@@ -714,7 +714,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "criterion",
- "futures",
+ "futures-util",
  "log",
  "metrics",
  "proptest",

@@ -16,7 +16,7 @@ keywords = ["metrics", "cloudwatch", "aws"]
 
 [dependencies]
 chrono = "0.4.13"
-futures = "0.3.5"
+futures-util = { version = "0.3.5", default-features = false }
 log = "0.4.11"
 metrics = { version = "0.12.1", features = ["std"] }
 rand = { version = "0.7", default-features = false, features = ["small_rng"] }

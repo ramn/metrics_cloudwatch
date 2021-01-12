@@ -1,6 +1,6 @@
 use std::{collections::BTreeMap, fmt};
 
-use futures::{future, prelude::*};
+use futures_util::{future, FutureExt};
 use rusoto_cloudwatch::CloudWatch;
 
 use crate::{

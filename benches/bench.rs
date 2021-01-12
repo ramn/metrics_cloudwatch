@@ -1,6 +1,6 @@
 use {
     criterion::{criterion_group, Benchmark, Criterion, Throughput},
-    futures::prelude::*,
+    futures_util::FutureExt,
     metrics::Recorder,
 };
 
