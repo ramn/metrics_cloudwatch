@@ -262,7 +262,7 @@ fn jitter_interval_at(
     stream::unfold((rng, delay), move |(mut rng, mut delay)| async move {
         (&mut delay).await;
         let now = delay.deadline();
-        delay.as_mut().reset(now + rng.gen_range(min, max));
+        delay.as_mut().reset(now + rng.gen_range(min..max));
         Some((now, (rng, delay)))
     })
 }
