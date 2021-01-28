@@ -89,3 +89,9 @@ impl From<Unit> for Cow<'static, str> {
         unit.as_str().into()
     }
 }
+
+impl From<Unit> for metrics::SharedString {
+    fn from(unit: Unit) -> Self {
+        unit.as_str().into()
+    }
+}

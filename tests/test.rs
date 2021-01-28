@@ -25,15 +25,15 @@ async fn test_flush_on_shutdown() -> Result<(), Box<dyn Error>> {
     tokio::time::advance(Duration::from_millis(5)).await;
 
     for i in 0..150 {
-        metrics::value!("test", i);
+        metrics::histogram!("test", i as f64);
         metrics::counter!("count", 1);
     }
-    metrics::value!("test", 0);
-    metrics::value!("test", 200);
-    metrics::value!("labels", 111, "label" => "1", "@unknown_@_label_is_skipped" => "abc");
-    metrics::value!("bytes", 200, "@unit" => metrics_cloudwatch::Unit::Bytes);
-    metrics::gauge!("gauge", 100);
-    metrics::gauge!("gauge", 200);
+    metrics::histogram!("test", 0.0);
+    metrics::histogram!("test", 200.0);
+    metrics::histogram!("labels", 111.0, "label" => "1", "@unknown_@_label_is_skipped" => "abc");
+    metrics::histogram!("bytes", 200.0, "@unit" => metrics_cloudwatch::Unit::Bytes);
+    metrics::gauge!("gauge", 100.0);
+    metrics::gauge!("gauge", 200.0);
     tokio::time::advance(Duration::from_millis(5)).await;
 
     // Send shutdown signal
@@ -102,7 +102,7 @@ async fn test_flush_on_shutdown() -> Result<(), Box<dyn Error>> {
         count_data.statistic_values,
         Some(StatisticSet {
             sample_count: 2.0,
-            sum: 300.0,
+            sum: 200.0,
             minimum: 100.0,
             maximum: 200.0,
         })
