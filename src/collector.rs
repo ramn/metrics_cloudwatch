@@ -11,7 +11,7 @@ use {
         stream::{self, Stream},
         FutureExt, StreamExt,
     },
-    metrics::{Key, Recorder},
+    metrics::{GaugeValue, Key, Recorder, Unit},
     rusoto_cloudwatch::{CloudWatch, Dimension, MetricDatum, PutMetricDataInput, StatisticSet},
     rusoto_core::Region,
     tokio::sync::mpsc,
@@ -21,7 +21,7 @@ use crate::{error::Error, BoxFuture};
 
 pub type ClientBuilder = Box<dyn Fn(Region) -> Box<dyn CloudWatch + Send + Sync> + Send + Sync>;
 type Count = usize;
-type HistogramValue = u64;
+type HistogramValue = ordered_float::NotNan<f64>;
 type Timestamp = u64;
 
 const MAX_CW_METRICS_PER_CALL: usize = 20;
@@ -59,9 +59,13 @@ enum Message {
 
 #[derive(Debug)]
 enum Value {
+    Register {
+        unit: Option<Unit>,
+        description: Option<&'static str>,
+    },
     Counter(u64),
-    Gauge(i64),
-    Histogram(u64),
+    Gauge(GaugeValue),
+    Histogram(HistogramValue),
 }
 
 #[derive(Clone, Debug, Default)]
@@ -79,7 +83,14 @@ struct Aggregate {
 
 struct Collector {
     metrics_data: BTreeMap<Timestamp, HashMap<Key, Aggregate>>,
+    metrics_config: HashMap<Key, MetricConfig>,
     config: CollectorConfig,
+}
+
+#[derive(Clone, Debug, Default)]
+struct MetricConfig {
+    unit: Option<Unit>,
+    description: Option<&'static str>,
 }
 
 #[derive(Debug)]
@@ -262,7 +273,7 @@ fn jitter_interval_at(
     stream::unfold((rng, delay), move |(mut rng, mut delay)| async move {
         (&mut delay).await;
         let now = delay.deadline();
-        delay.as_mut().reset(now + rng.gen_range(min, max));
+        delay.as_mut().reset(now + rng.gen_range(min..max));
         Some((now, (rng, delay)))
     })
 }
@@ -302,6 +313,7 @@ impl Collector {
     fn new(config: CollectorConfig) -> Self {
         Self {
             metrics_data: Default::default(),
+            metrics_config: Default::default(),
             config,
         }
     }
@@ -320,32 +332,33 @@ impl Collector {
     }
 
     fn accept_datum(&mut self, datum: Datum) {
-        let aggregate = self
-            .metrics_data
-            .entry(time_key(
-                current_timestamp(),
-                self.config.storage_resolution,
-            ))
-            .or_insert_with(HashMap::new)
-            .entry(datum.key)
-            .or_default();
-
         match datum.value {
+            Value::Register { unit, description } => {
+                let metric_config = self.metrics_config.entry(datum.key).or_default();
+                if unit.is_some() {
+                    metric_config.unit = unit;
+                }
+                if description.is_some() {
+                    metric_config.description = description;
+                }
+            }
+
             Value::Counter(value) => {
-                let counter = &mut aggregate.counter;
+                let counter = &mut self.get_aggregate(datum.key).counter;
                 counter.sample_count += 1;
                 counter.sum += value;
             }
-            Value::Gauge(value) => {
-                let value = value as f64;
+            Value::Gauge(gauge_value) => {
+                let aggregate = self.get_aggregate(datum.key);
                 match &mut aggregate.gauge {
                     Some(gauge) => {
                         gauge.sample_count += 1.0;
-                        gauge.sum += value;
-                        gauge.maximum = gauge.maximum.max(value);
-                        gauge.minimum = gauge.minimum.min(value);
+                        gauge.sum = gauge_value.update_value(gauge.sum);
+                        gauge.maximum = gauge.maximum.max(gauge.sum);
+                        gauge.minimum = gauge.minimum.min(gauge.sum);
                     }
                     None => {
+                        let value = gauge_value.update_value(0.0);
                         aggregate.gauge = Some(StatisticSet {
                             sample_count: 1.0,
                             sum: value,
@@ -356,9 +369,24 @@ impl Collector {
                 }
             }
             Value::Histogram(value) => {
-                *aggregate.histogram.entry(value).or_default() += 1;
+                *self
+                    .get_aggregate(datum.key)
+                    .histogram
+                    .entry(value)
+                    .or_default() += 1;
             }
         }
+    }
+
+    fn get_aggregate(&mut self, key: Key) -> &mut Aggregate {
+        self.metrics_data
+            .entry(time_key(
+                current_timestamp(),
+                self.config.storage_resolution,
+            ))
+            .or_insert_with(HashMap::new)
+            .entry(key)
+            .or_default()
     }
 
     fn dimensions(&self, key: &Key) -> Vec<Dimension> {
@@ -421,11 +449,16 @@ impl Collector {
                     histogram,
                 } = aggregate;
                 let dimensions = self.dimensions(&key);
-                let unit = key.labels().find(|l| l.key() == "@unit").map(|l| l.value());
+                let unit = self
+                    .metrics_config
+                    .get(&key)
+                    .and_then(|metric_config| metric_config.unit.as_ref())
+                    .and_then(unit_cloudwatch_str)
+                    .or_else(|| key.labels().find(|l| l.key() == "@unit").map(|l| l.value()));
 
                 let stats_set_datum = &mut |stats_set, unit: Option<&str>| MetricDatum {
                     dimensions: Some(dimensions.clone()),
-                    metric_name: key.name().into_owned(),
+                    metric_name: key.name().to_string(),
                     timestamp: Some(timestamp.clone()),
                     storage_resolution: Some(self.config.storage_resolution.as_secs()),
                     statistic_values: Some(stats_set),
@@ -467,7 +500,7 @@ impl Collector {
 
                 let histogram_datum = &mut |Histogram { values, counts }, unit| MetricDatum {
                     dimensions: Some(dimensions.clone()),
-                    metric_name: key.name().into_owned(),
+                    metric_name: key.name().to_string(),
                     timestamp: Some(timestamp.clone()),
                     storage_resolution: Some(self.config.storage_resolution.as_secs()),
                     unit,
@@ -478,7 +511,7 @@ impl Collector {
 
                 if !histogram.is_empty() {
                     let histogram_data = &mut histogram.into_iter().map(|(k, v)| HistogramDatum {
-                        value: k as f64,
+                        value: f64::from(k),
                         count: v as f64,
                     });
                     loop {
@@ -516,6 +549,27 @@ impl Collector {
 }
 
 impl Recorder for RecorderHandle {
+    fn register_counter(&self, key: Key, unit: Option<Unit>, description: Option<&'static str>) {
+        let _ = self.0.clone().try_send(Datum {
+            key,
+            value: Value::Register { unit, description },
+        });
+    }
+
+    fn register_gauge(&self, key: Key, unit: Option<Unit>, description: Option<&'static str>) {
+        let _ = self.0.clone().try_send(Datum {
+            key,
+            value: Value::Register { unit, description },
+        });
+    }
+
+    fn register_histogram(&self, key: Key, unit: Option<Unit>, description: Option<&'static str>) {
+        let _ = self.0.clone().try_send(Datum {
+            key,
+            value: Value::Register { unit, description },
+        });
+    }
+
     fn increment_counter(&self, key: Key, value: u64) {
         let _ = self.0.clone().try_send(Datum {
             key,
@@ -523,17 +577,17 @@ impl Recorder for RecorderHandle {
         });
     }
 
-    fn update_gauge(&self, key: Key, value: i64) {
+    fn update_gauge(&self, key: Key, value: GaugeValue) {
         let _ = self.0.clone().try_send(Datum {
             key,
             value: Value::Gauge(value),
         });
     }
 
-    fn record_histogram(&self, key: Key, value: u64) {
+    fn record_histogram(&self, key: Key, value: f64) {
         let _ = self.0.clone().try_send(Datum {
             key,
-            value: Value::Histogram(value),
+            value: Value::Histogram(HistogramValue::new(value).unwrap()),
         });
     }
 }
@@ -547,9 +601,34 @@ impl Resolution {
     }
 }
 
+fn unit_cloudwatch_str(unit: &Unit) -> Option<&'static str> {
+    let cloudwatch_unit = match unit {
+        Unit::Seconds => crate::Unit::Seconds,
+        Unit::Microseconds => crate::Unit::Microseconds,
+        Unit::Milliseconds => crate::Unit::Milliseconds,
+        Unit::Nanoseconds => return None,
+        Unit::Bytes => crate::Unit::Bytes,
+        // Close enough
+        Unit::Kibibytes => crate::Unit::Kilobytes,
+        Unit::Mebibytes => crate::Unit::Megabytes,
+        Unit::Gigibytes => crate::Unit::Gigabytes,
+        Unit::Tebibytes => crate::Unit::Terabytes,
+
+        Unit::Percent => crate::Unit::Percent,
+        Unit::Count => crate::Unit::Count,
+        Unit::BitsPerSecond => crate::Unit::BitsPerSecond,
+        Unit::KilobitsPerSecond => crate::Unit::KilobitsPerSecond,
+        Unit::MegabitsPerSecond => crate::Unit::MegabitsPerSecond,
+        Unit::GigabitsPerSecond => crate::Unit::GigabitsPerSecond,
+        Unit::TerabitsPerSecond => crate::Unit::TerabitsPerSecond,
+        Unit::CountPerSecond => crate::Unit::CountPerSecond,
+    };
+    Some(cloudwatch_unit.as_str())
+}
+
 #[cfg(test)]
 mod tests {
-    use metrics::Label;
+    use metrics::{KeyData, Label};
 
     use super::*;
 
@@ -620,14 +699,14 @@ mod tests {
             storage_resolution: Resolution::Minute,
         });
 
-        let key = Key::from_name_and_labels(
+        let key = Key::Owned(KeyData::from_parts(
             "my-metric",
             vec![
-                Label::from(("zzz", "123")),
-                Label::from(("first", "override-value")),
-                Label::from(("aaa", "123")),
+                Label::new("zzz", "123"),
+                Label::new("first", "override-value"),
+                Label::new("aaa", "123"),
             ],
-        );
+        ));
 
         let actual = collector.dimensions(&key);
 
