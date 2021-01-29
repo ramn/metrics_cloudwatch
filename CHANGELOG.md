@@ -1,3 +1,14 @@
+<a name="v0.11.0"></a>
+## v0.11.0 (2021-01-29)
+
+
+#### Features
+
+*   Record and translate the registered metrics units ([66a3a71f](https://github.com/ramn/metrics_cloudwatch/commit/66a3a71f808d5992053f3c886d3d12f0d6dc328e))
+*   Update to metrics 0.13 ([db5c3b9d](https://github.com/ramn/metrics_cloudwatch/commit/db5c3b9d1a0b12bee38eaf528310a290ed37164f))
+
+
+
 <a name="v0.9.0"></a>
 ## v0.9.0 (2020-09-28)
 
