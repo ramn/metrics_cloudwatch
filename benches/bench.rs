@@ -1,5 +1,5 @@
 use {
-    criterion::{criterion_group, Benchmark, Criterion, Throughput},
+    criterion::{criterion_group, Criterion, Throughput},
     futures_util::FutureExt,
     metrics::Recorder,
 };
@@ -11,9 +11,10 @@ mod common;
 
 fn simple(c: &mut Criterion) {
     const NUM_ENTRIES: usize = 2 * 1024;
-    c.bench(
-        "send_metrics",
-        Benchmark::new("full", |b| {
+    let mut group = c.benchmark_group("send_metrics");
+
+    group
+        .bench_function("full", |b| {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -36,9 +37,16 @@ fn simple(c: &mut Criterion) {
 
                     for i in 0..NUM_ENTRIES {
                         match i % 3 {
-                            0 => recorder.increment_counter("counter".into(), 1),
-                            1 => recorder.update_gauge("gauge".into(), i as i64 % 100),
-                            2 => recorder.record_histogram("histogram".into(), i as u64 % 10),
+                            0 => recorder
+                                .increment_counter(metrics::KeyData::from("counter").into(), 1),
+                            1 => recorder.update_gauge(
+                                metrics::KeyData::from("gauge").into(),
+                                metrics::GaugeValue::Absolute((i as i64 % 100) as f64),
+                            ),
+                            2 => recorder.record_histogram(
+                                metrics::KeyData::from("histogram").into(),
+                                (i as u64 % 10) as f64,
+                            ),
                             _ => unreachable!(),
                         }
                         if i % 100 == 0 {
@@ -67,8 +75,9 @@ fn simple(c: &mut Criterion) {
                 });
             });
         })
-        .throughput(Throughput::Elements(NUM_ENTRIES as u64)),
-    );
+        .throughput(Throughput::Elements(NUM_ENTRIES as u64));
+
+    group.finish();
 }
 
 criterion_group! {
