@@ -1,3 +1,11 @@
+<a name="v0.12.0"></a>
+## v0.12.0 (2021-02-08)
+
+
+#### Bug Fixes
+
+*   Make gauges display the current value as "Average" ([4124e3e4](https://github.com/ramn/metrics_cloudwatch/commit/4124e3e4cdf967846459eae2606354e64ab2e291))
+
 <a name="v0.11.0"></a>
 ## v0.11.0 (2021-01-29)
 
