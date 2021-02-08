@@ -18,8 +18,8 @@ keywords = ["metrics", "cloudwatch", "aws"]
 chrono = "0.4.13"
 futures-util = { version = "0.3.5", default-features = false }
 log = "0.4.11"
-metrics = { version = "0.13", features = ["std"] }
-ordered-float = "1"
+metrics = { version = "0.14", features = ["std"] }
+ordered-float = "2"
 rand = { version = "0.8", default-features = false, features = ["small_rng"] }
 rusoto_cloudwatch = "0.46"
 rusoto_core = "0.46"
