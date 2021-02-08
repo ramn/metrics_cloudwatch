@@ -101,7 +101,8 @@ async fn test_flush_on_shutdown() -> Result<(), Box<dyn Error>> {
     assert_eq!(
         count_data.statistic_values,
         Some(StatisticSet {
-            sample_count: 2.0,
+            sample_count: 1.0,
+            // The last value submitted
             sum: 200.0,
             minimum: 100.0,
             maximum: 200.0,
