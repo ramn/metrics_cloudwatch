@@ -77,8 +77,15 @@ pub struct Counter {
 #[derive(Clone, Debug, Default)]
 struct Aggregate {
     counter: Counter,
-    gauge: Option<StatisticSet>,
+    gauge: Option<Gauge>,
     histogram: HashMap<HistogramValue, Count>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct Gauge {
+    maximum: f64,
+    minimum: f64,
+    current: f64,
 }
 
 struct Collector {
@@ -352,16 +359,14 @@ impl Collector {
                 let aggregate = self.get_aggregate(datum.key);
                 match &mut aggregate.gauge {
                     Some(gauge) => {
-                        gauge.sample_count += 1.0;
-                        gauge.sum = gauge_value.update_value(gauge.sum);
-                        gauge.maximum = gauge.maximum.max(gauge.sum);
-                        gauge.minimum = gauge.minimum.min(gauge.sum);
+                        gauge.current = gauge_value.update_value(gauge.current);
+                        gauge.maximum = gauge.maximum.max(gauge.current);
+                        gauge.minimum = gauge.minimum.min(gauge.current);
                     }
                     None => {
                         let value = gauge_value.update_value(0.0);
-                        aggregate.gauge = Some(StatisticSet {
-                            sample_count: 1.0,
-                            sum: value,
+                        aggregate.gauge = Some(Gauge {
+                            current: value,
                             maximum: value,
                             minimum: value,
                         });
@@ -494,8 +499,20 @@ impl Collector {
                     metrics_batch.push(stats_set_datum(stats_set, unit.or(Some("Count"))));
                 }
 
-                if let Some(gauge) = gauge {
-                    metrics_batch.push(stats_set_datum(gauge, unit));
+                if let Some(Gauge {
+                    current,
+                    minimum,
+                    maximum,
+                }) = gauge
+                {
+                    // Gauges only submit the current value and the max and min
+                    let statistic_set = StatisticSet {
+                        sample_count: 1.0,
+                        sum: current,
+                        minimum,
+                        maximum,
+                    };
+                    metrics_batch.push(stats_set_datum(statistic_set, unit));
                 }
 
                 let histogram_datum = &mut |Histogram { values, counts }, unit| MetricDatum {
