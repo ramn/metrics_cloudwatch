@@ -1,3 +1,13 @@
+<a name="v0.12.1"></a>
+### v0.12.1 (2021-02-09)
+
+
+#### Features
+
+*   Allow rustls to be used over native-tls ([60703720](https://github.com/ramn/metrics_cloudwatch/commit/607037208aa9c8cb196f2f25c8989d4b9f1bf6d6))
+
+
+
 <a name="v0.12.0"></a>
 ## v0.12.0 (2021-02-08)
 
