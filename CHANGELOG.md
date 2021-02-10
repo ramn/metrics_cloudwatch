@@ -1,3 +1,13 @@
+<a name="v0.12.2"></a>
+### v0.12.2 (2021-02-10)
+
+
+#### Bug Fixes
+
+*   rand::thread_rng is required ([98f58ab7](https://github.com/ramn/metrics_cloudwatch/commit/98f58ab7e78c9c7448aa06968ec0f0e7c37882fa))
+
+
+
 <a name="v0.12.1"></a>
 ### v0.12.1 (2021-02-09)
 
