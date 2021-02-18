@@ -1,7 +1,7 @@
 use std::{error::Error, time::Duration};
 
 use futures_util::FutureExt;
-use rusoto_cloudwatch::StatisticSet;
+use rusoto_cloudwatch::{Dimension, StatisticSet};
 
 use common::MockCloudWatchClient;
 
@@ -16,6 +16,7 @@ async fn test_flush_on_shutdown() -> Result<(), Box<dyn Error>> {
     let backend_fut = Box::pin(
         metrics_cloudwatch::Builder::new_with(client.clone())
             .cloudwatch_namespace("test-ns")
+            .default_dimension("dimension", "default")
             .send_interval_secs(1)
             .storage_resolution(metrics_cloudwatch::Resolution::Second)
             .shutdown_signal(Box::pin(rx.map(|_| ())))
@@ -31,9 +32,11 @@ async fn test_flush_on_shutdown() -> Result<(), Box<dyn Error>> {
     metrics::histogram!("test", 0.0);
     metrics::histogram!("test", 200.0);
     metrics::histogram!("labels", 111.0, "label" => "1", "@unknown_@_label_is_skipped" => "abc");
+    metrics::histogram!("labels2", 111.0, "dimension" => "", "label" => "1");
     metrics::histogram!("bytes", 200.0, "@unit" => metrics_cloudwatch::Unit::Bytes);
     metrics::gauge!("gauge", 100.0);
     metrics::gauge!("gauge", 200.0);
+
     tokio::time::advance(Duration::from_millis(5)).await;
 
     // Send shutdown signal
@@ -45,14 +48,20 @@ async fn test_flush_on_shutdown() -> Result<(), Box<dyn Error>> {
 
     let metric_data = &actual[0].metric_data;
 
-    assert_eq!(metric_data.len(), 6);
+    assert_eq!(metric_data.len(), 7);
     let value_metric = metric_data
         .iter()
         .find(|m| m.metric_name == "test" && m.counts.as_ref().unwrap().len() == 150)
         .unwrap();
     assert_eq!(value_metric.counts.as_ref().unwrap().len(), 150);
     assert_eq!(value_metric.values.as_ref().unwrap().len(), 150);
-    assert_eq!(value_metric.dimensions, Some(vec![]));
+    assert_eq!(
+        value_metric.dimensions,
+        Some(vec![Dimension {
+            name: "dimension".into(),
+            value: "default".into()
+        }])
+    );
 
     let dim_metric = metric_data
         .iter()
@@ -60,6 +69,24 @@ async fn test_flush_on_shutdown() -> Result<(), Box<dyn Error>> {
         .unwrap();
     assert_eq!(
         dim_metric.dimensions,
+        Some(vec![
+            Dimension {
+                name: "dimension".into(),
+                value: "default".into()
+            },
+            rusoto_cloudwatch::Dimension {
+                name: "label".into(),
+                value: "1".into()
+            }
+        ])
+    );
+
+    let dim_metric2 = metric_data
+        .iter()
+        .find(|m| m.metric_name == "labels2")
+        .unwrap();
+    assert_eq!(
+        dim_metric2.dimensions,
         Some(vec![rusoto_cloudwatch::Dimension {
             name: "label".into(),
             value: "1".into()
@@ -72,7 +99,13 @@ async fn test_flush_on_shutdown() -> Result<(), Box<dyn Error>> {
         .unwrap();
     assert_eq!(count_metric.counts.as_ref().unwrap().len(), 1);
     assert_eq!(count_metric.values.as_ref().unwrap().len(), 1);
-    assert_eq!(value_metric.dimensions, Some(vec![]));
+    assert_eq!(
+        value_metric.dimensions,
+        Some(vec![Dimension {
+            name: "dimension".into(),
+            value: "default".into()
+        }])
+    );
 
     let count_data = metric_data
         .iter()
