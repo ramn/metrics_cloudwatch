@@ -22,3 +22,5 @@ git add CHANGELOG.md
 git commit -m "Update changelog for $VERSION"
 
 cargo release $LEVEL
+
+git push upstream master --tags || true
