@@ -417,6 +417,7 @@ impl Collector {
             all_dims.sort_by(|a, b| a.name.cmp(&b.name));
             all_dims.dedup_by(|a, b| a.name == b.name);
         }
+        all_dims.retain(|dim| !dim.value.is_empty());
 
         if all_dims.len() > MAX_CLOUDWATCH_DIMENSIONS {
             all_dims.truncate(MAX_CLOUDWATCH_DIMENSIONS);

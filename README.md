@@ -34,6 +34,24 @@ fn main() {
 }
 ```
 
+Any labels specified will map to Cloudwatch dimensions
+
+```rust
+metrics::histogram!("histogram", 100.0, "dimension_name" => "dimension_value");
+```
+
+Specifying the empty string for the value will remove the default dimension of the same name from the metric.
+
+```rust
+metrics::histogram!("histogram", 100.0, "dimension_name" => "");
+```
+
+The special `@unit` label accepts a `metrics_cloudwatch::Unit` which specifies the unit for the metric (the unit can also be specified when registering the metric). Other `@` prefixed labels are ignored.
+
+```rust
+metrics::histogram!("histogram", 100.0, "@unit" => metrics_cloudwatch::Unit::Seconds);
+```
+
 Limitations
 -----------
 
