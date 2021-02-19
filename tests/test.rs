@@ -74,7 +74,7 @@ async fn test_flush_on_shutdown() -> Result<(), Box<dyn Error>> {
                 name: "dimension".into(),
                 value: "default".into()
             },
-            rusoto_cloudwatch::Dimension {
+            Dimension {
                 name: "label".into(),
                 value: "1".into()
             }
@@ -87,7 +87,7 @@ async fn test_flush_on_shutdown() -> Result<(), Box<dyn Error>> {
         .unwrap();
     assert_eq!(
         dim_metric2.dimensions,
-        Some(vec![rusoto_cloudwatch::Dimension {
+        Some(vec![Dimension {
             name: "label".into(),
             value: "1".into()
         }])
