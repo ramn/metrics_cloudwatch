@@ -1,3 +1,13 @@
+<a name="v0.12.4"></a>
+### v0.12.4 (2021-02-19)
+
+
+#### Features
+
+*   Allow default dimensions to be removed for specific metrics ([8e99ebb5](https://github.com/ramn/metrics_cloudwatch/commit/8e99ebb55aab5896b9b0bb55e3f71e028e74d318))
+
+
+
 <a name="v0.12.3"></a>
 ### v0.12.3 (2021-02-19)
 
