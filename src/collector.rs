@@ -121,7 +121,9 @@ struct HistogramDatum {
     value: f64,
 }
 
-pub struct RecorderHandle(mpsc::Sender<Datum>);
+pub struct RecorderHandle {
+    sender: mpsc::Sender<Datum>,
+}
 
 pub fn init(config: Config) {
     let _ = thread::spawn(|| {
@@ -173,7 +175,9 @@ pub fn new(config: Config) -> (RecorderHandle, impl Future<Output = ()>) {
         });
     };
     (
-        RecorderHandle(collect_sender),
+        RecorderHandle {
+            sender: collect_sender,
+        },
         future::join(collection_fut, emitter.map(|_| ())).map(|_| ()),
     )
 }
@@ -646,42 +650,42 @@ impl Collector {
 
 impl Recorder for RecorderHandle {
     fn register_counter(&self, key: Key, unit: Option<Unit>, description: Option<&'static str>) {
-        let _ = self.0.clone().try_send(Datum {
+        let _ = self.sender.clone().try_send(Datum {
             key,
             value: Value::Register { unit, description },
         });
     }
 
     fn register_gauge(&self, key: Key, unit: Option<Unit>, description: Option<&'static str>) {
-        let _ = self.0.clone().try_send(Datum {
+        let _ = self.sender.clone().try_send(Datum {
             key,
             value: Value::Register { unit, description },
         });
     }
 
     fn register_histogram(&self, key: Key, unit: Option<Unit>, description: Option<&'static str>) {
-        let _ = self.0.clone().try_send(Datum {
+        let _ = self.sender.clone().try_send(Datum {
             key,
             value: Value::Register { unit, description },
         });
     }
 
     fn increment_counter(&self, key: Key, value: u64) {
-        let _ = self.0.clone().try_send(Datum {
+        let _ = self.sender.clone().try_send(Datum {
             key,
             value: Value::Counter(value),
         });
     }
 
     fn update_gauge(&self, key: Key, value: GaugeValue) {
-        let _ = self.0.clone().try_send(Datum {
+        let _ = self.sender.clone().try_send(Datum {
             key,
             value: Value::Gauge(value),
         });
     }
 
     fn record_histogram(&self, key: Key, value: f64) {
-        let _ = self.0.clone().try_send(Datum {
+        let _ = self.sender.clone().try_send(Datum {
             key,
             value: Value::Histogram(HistogramValue::new(value).unwrap()),
         });
