@@ -338,6 +338,64 @@ fn time_key(timestamp: Timestamp, resolution: Resolution) -> Timestamp {
     }
 }
 
+fn get_timeslot<'a>(
+    metrics_data: &'a mut BTreeMap<Timestamp, HashMap<Key, Aggregate>>,
+    config: &'a CollectorConfig,
+    timestamp: Timestamp,
+) -> &'a mut HashMap<Key, Aggregate> {
+    metrics_data
+        .entry(time_key(timestamp, config.storage_resolution))
+        .or_insert_with(HashMap::new)
+}
+
+fn accept_datum(
+    slot: &mut HashMap<Key, Aggregate>,
+    metrics_config: &mut HashMap<Key, MetricConfig>,
+    datum: Datum,
+) {
+    match datum.value {
+        Value::Register { unit, description } => {
+            let metric_config = metrics_config.entry(datum.key).or_default();
+            if unit.is_some() {
+                metric_config.unit = unit;
+            }
+            if description.is_some() {
+                metric_config.description = description;
+            }
+        }
+
+        Value::Counter(value) => {
+            let aggregate = slot.entry(datum.key).or_default();
+            let counter = &mut aggregate.counter;
+            counter.sample_count += 1;
+            counter.sum += value;
+        }
+        Value::Gauge(gauge_value) => {
+            let aggregate = slot.entry(datum.key).or_default();
+
+            match &mut aggregate.gauge {
+                Some(gauge) => {
+                    gauge.current = gauge_value.update_value(gauge.current);
+                    gauge.maximum = gauge.maximum.max(gauge.current);
+                    gauge.minimum = gauge.minimum.min(gauge.current);
+                }
+                None => {
+                    let value = gauge_value.update_value(0.0);
+                    aggregate.gauge = Some(Gauge {
+                        current: value,
+                        maximum: value,
+                        minimum: value,
+                    });
+                }
+            }
+        }
+        Value::Histogram(value) => {
+            let aggregate = slot.entry(datum.key).or_default();
+            *aggregate.histogram.entry(value).or_default() += 1;
+        }
+    }
+}
+
 impl Collector {
     fn new(config: CollectorConfig) -> Self {
         Self {
@@ -354,7 +412,9 @@ impl Collector {
                 match message {
                     Message::Datum(datum) => {
                         let timestamp = current_timestamp();
-                        self.accept_datum(timestamp, datum);
+                        let slot = get_timeslot(&mut self.metrics_data, &self.config, timestamp);
+
+                        accept_datum(slot, &mut self.metrics_config, datum);
 
                         // `current_timestamp` can be pretty expensive when there are a lot of
                         // metrics so as long as we are immediately able to read more datums we
@@ -365,11 +425,16 @@ impl Collector {
                         for _ in 0..100 {
                             match future::lazy(|cx| messages.as_mut().poll_next(cx)).await {
                                 Poll::Ready(Some(message)) => match message {
-                                    Message::Datum(datum) => self.accept_datum(timestamp, datum),
+                                    Message::Datum(datum) => {
+                                        accept_datum(slot, &mut self.metrics_config, datum)
+                                    }
                                     Message::SendBatch {
                                         send_all_before,
                                         emit_sender,
-                                    } => self.accept_send_batch(send_all_before, emit_sender)?,
+                                    } => {
+                                        self.accept_send_batch(send_all_before, emit_sender)?;
+                                        break;
+                                    }
                                 },
                                 Poll::Ready(None) => return Ok(()),
                                 Poll::Pending => tokio::task::yield_now().await,
@@ -403,56 +468,8 @@ impl Collector {
     }
 
     fn accept_datum(&mut self, timestamp: Timestamp, datum: Datum) {
-        match datum.value {
-            Value::Register { unit, description } => {
-                let metric_config = self.metrics_config.entry(datum.key).or_default();
-                if unit.is_some() {
-                    metric_config.unit = unit;
-                }
-                if description.is_some() {
-                    metric_config.description = description;
-                }
-            }
-
-            Value::Counter(value) => {
-                let counter = &mut self.get_aggregate(timestamp, datum.key).counter;
-                counter.sample_count += 1;
-                counter.sum += value;
-            }
-            Value::Gauge(gauge_value) => {
-                let aggregate = self.get_aggregate(timestamp, datum.key);
-                match &mut aggregate.gauge {
-                    Some(gauge) => {
-                        gauge.current = gauge_value.update_value(gauge.current);
-                        gauge.maximum = gauge.maximum.max(gauge.current);
-                        gauge.minimum = gauge.minimum.min(gauge.current);
-                    }
-                    None => {
-                        let value = gauge_value.update_value(0.0);
-                        aggregate.gauge = Some(Gauge {
-                            current: value,
-                            maximum: value,
-                            minimum: value,
-                        });
-                    }
-                }
-            }
-            Value::Histogram(value) => {
-                *self
-                    .get_aggregate(timestamp, datum.key)
-                    .histogram
-                    .entry(value)
-                    .or_default() += 1;
-            }
-        }
-    }
-
-    fn get_aggregate(&mut self, timestamp: Timestamp, key: Key) -> &mut Aggregate {
-        self.metrics_data
-            .entry(time_key(timestamp, self.config.storage_resolution))
-            .or_insert_with(HashMap::new)
-            .entry(key)
-            .or_default()
+        let slot = get_timeslot(&mut self.metrics_data, &self.config, timestamp);
+        accept_datum(slot, &mut self.metrics_config, datum)
     }
 
     fn dimensions(&self, key: &Key) -> Vec<Dimension> {
