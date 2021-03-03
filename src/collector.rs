@@ -2,7 +2,9 @@ use std::{
     collections::{BTreeMap, HashMap},
     fmt,
     future::Future,
-    mem, thread,
+    mem,
+    task::Poll,
+    thread,
     time::{self, Duration, SystemTime},
 };
 
@@ -146,7 +148,7 @@ pub async fn init_future(config: Config) -> Result<(), Error> {
 pub fn new(config: Config) -> (RecorderHandle, impl Future<Output = ()>) {
     let (collect_sender, mut collect_receiver) = mpsc::channel(1024);
     let (emit_sender, emit_receiver) = mpsc::channel(config.metric_buffer_size);
-    let mut message_stream = Box::pin(
+    let message_stream = Box::pin(
         stream::select(
             stream::poll_fn(move |cx| collect_receiver.poll_recv(cx)).map(Message::Datum),
             mk_send_batch_timer(emit_sender.clone(), &config),
@@ -163,11 +165,7 @@ pub fn new(config: Config) -> (RecorderHandle, impl Future<Output = ()>) {
 
     let mut collector = Collector::new(internal_config);
     let collection_fut = async move {
-        while let Some(msg) = message_stream.next().await {
-            collector.accept(msg);
-        }
-        // Need to drop this before flushing or we deadlock on shutdown
-        drop(message_stream);
+        collector.accept_messages(message_stream).await;
         // Send a final flush on shutdown
         collector.accept(Message::SendBatch {
             send_all_before: std::u64::MAX,
@@ -349,9 +347,51 @@ impl Collector {
         }
     }
 
+    async fn accept_messages(&mut self, messages: impl Stream<Item = Message>) {
+        futures_util::pin_mut!(messages);
+        while let Some(message) = messages.next().await {
+            let result = async {
+                match message {
+                    Message::Datum(datum) => {
+                        let timestamp = current_timestamp();
+                        self.accept_datum(timestamp, datum);
+
+                        // `current_timestamp` can be pretty expensive when there are a lot of
+                        // metrics so as long as we are immediately able to read more datums we
+                        // assume that we can use the same timestamp for those, thereby amortizing
+                        // the cost.
+                        // 100 is arbitrarily chosen to get good a good amount of reuse without
+                        // risking that this is always ready, thereby never updating the timestamp
+                        for _ in 0..100 {
+                            match future::lazy(|cx| messages.as_mut().poll_next(cx)).await {
+                                Poll::Ready(Some(message)) => match message {
+                                    Message::Datum(datum) => self.accept_datum(timestamp, datum),
+                                    Message::SendBatch {
+                                        send_all_before,
+                                        emit_sender,
+                                    } => self.accept_send_batch(send_all_before, emit_sender)?,
+                                },
+                                Poll::Ready(None) => return Ok(()),
+                                Poll::Pending => tokio::task::yield_now().await,
+                            }
+                        }
+                        Ok(())
+                    }
+                    Message::SendBatch {
+                        send_all_before,
+                        emit_sender,
+                    } => self.accept_send_batch(send_all_before, emit_sender),
+                }
+            };
+            if let Err(e) = result.await {
+                log::warn!("Failed to accept message: {}", e);
+            }
+        }
+    }
+
     fn accept(&mut self, message: Message) {
         let result = match message {
-            Message::Datum(datum) => Ok(self.accept_datum(datum)),
+            Message::Datum(datum) => Ok(self.accept_datum(current_timestamp(), datum)),
             Message::SendBatch {
                 send_all_before,
                 emit_sender,
@@ -362,7 +402,7 @@ impl Collector {
         }
     }
 
-    fn accept_datum(&mut self, datum: Datum) {
+    fn accept_datum(&mut self, timestamp: Timestamp, datum: Datum) {
         match datum.value {
             Value::Register { unit, description } => {
                 let metric_config = self.metrics_config.entry(datum.key).or_default();
@@ -375,12 +415,12 @@ impl Collector {
             }
 
             Value::Counter(value) => {
-                let counter = &mut self.get_aggregate(datum.key).counter;
+                let counter = &mut self.get_aggregate(timestamp, datum.key).counter;
                 counter.sample_count += 1;
                 counter.sum += value;
             }
             Value::Gauge(gauge_value) => {
-                let aggregate = self.get_aggregate(datum.key);
+                let aggregate = self.get_aggregate(timestamp, datum.key);
                 match &mut aggregate.gauge {
                     Some(gauge) => {
                         gauge.current = gauge_value.update_value(gauge.current);
@@ -399,7 +439,7 @@ impl Collector {
             }
             Value::Histogram(value) => {
                 *self
-                    .get_aggregate(datum.key)
+                    .get_aggregate(timestamp, datum.key)
                     .histogram
                     .entry(value)
                     .or_default() += 1;
@@ -407,12 +447,9 @@ impl Collector {
         }
     }
 
-    fn get_aggregate(&mut self, key: Key) -> &mut Aggregate {
+    fn get_aggregate(&mut self, timestamp: Timestamp, key: Key) -> &mut Aggregate {
         self.metrics_data
-            .entry(time_key(
-                current_timestamp(),
-                self.config.storage_resolution,
-            ))
+            .entry(time_key(timestamp, self.config.storage_resolution))
             .or_insert_with(HashMap::new)
             .entry(key)
             .or_default()
