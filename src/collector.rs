@@ -650,42 +650,42 @@ impl Collector {
 
 impl Recorder for RecorderHandle {
     fn register_counter(&self, key: Key, unit: Option<Unit>, description: Option<&'static str>) {
-        let _ = self.sender.clone().try_send(Datum {
+        let _ = self.sender.try_send(Datum {
             key,
             value: Value::Register { unit, description },
         });
     }
 
     fn register_gauge(&self, key: Key, unit: Option<Unit>, description: Option<&'static str>) {
-        let _ = self.sender.clone().try_send(Datum {
+        let _ = self.sender.try_send(Datum {
             key,
             value: Value::Register { unit, description },
         });
     }
 
     fn register_histogram(&self, key: Key, unit: Option<Unit>, description: Option<&'static str>) {
-        let _ = self.sender.clone().try_send(Datum {
+        let _ = self.sender.try_send(Datum {
             key,
             value: Value::Register { unit, description },
         });
     }
 
     fn increment_counter(&self, key: Key, value: u64) {
-        let _ = self.sender.clone().try_send(Datum {
+        let _ = self.sender.try_send(Datum {
             key,
             value: Value::Counter(value),
         });
     }
 
     fn update_gauge(&self, key: Key, value: GaugeValue) {
-        let _ = self.sender.clone().try_send(Datum {
+        let _ = self.sender.try_send(Datum {
             key,
             value: Value::Gauge(value),
         });
     }
 
     fn record_histogram(&self, key: Key, value: f64) {
-        let _ = self.sender.clone().try_send(Datum {
+        let _ = self.sender.try_send(Datum {
             key,
             value: Value::Histogram(HistogramValue::new(value).unwrap()),
         });
