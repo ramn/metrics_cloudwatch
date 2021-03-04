@@ -178,7 +178,9 @@ pub fn new(config: Config) -> (RecorderHandle, impl Future<Output = ()>) {
         RecorderHandle {
             sender: collect_sender,
         },
-        future::join(collection_fut, emitter.map(|_| ())).map(|_| ()),
+        async move {
+            futures_util::join!(collection_fut, emitter);
+        },
     )
 }
 
