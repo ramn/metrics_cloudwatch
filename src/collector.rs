@@ -169,10 +169,12 @@ pub fn new(config: Config) -> (RecorderHandle, impl Future<Output = ()>) {
     let collection_fut = async move {
         collector.accept_messages(message_stream).await;
         // Send a final flush on shutdown
-        collector.accept(Message::SendBatch {
-            send_all_before: std::u64::MAX,
-            emit_sender,
-        });
+        collector
+            .accept(Message::SendBatch {
+                send_all_before: std::u64::MAX,
+                emit_sender,
+            })
+            .await;
     };
     (
         RecorderHandle {
@@ -443,7 +445,10 @@ impl Collector {
                                     }
                                 },
                                 Poll::Ready(None) => return Ok(()),
-                                Poll::Pending => tokio::task::yield_now().await,
+                                Poll::Pending => {
+                                    tokio::task::yield_now().await;
+                                    break;
+                                }
                             }
                         }
                         Ok(())
@@ -460,22 +465,8 @@ impl Collector {
         }
     }
 
-    fn accept(&mut self, message: Message) {
-        let result = match message {
-            Message::Datum(datum) => Ok(self.accept_datum(current_timestamp(), datum)),
-            Message::SendBatch {
-                send_all_before,
-                emit_sender,
-            } => self.accept_send_batch(send_all_before, emit_sender),
-        };
-        if let Err(e) = result {
-            log::warn!("Failed to accept message: {}", e);
-        }
-    }
-
-    fn accept_datum(&mut self, timestamp: Timestamp, datum: Datum) {
-        let slot = get_timeslot(&mut self.metrics_data, &self.config, timestamp);
-        accept_datum(slot, &mut self.metrics_config, datum)
+    async fn accept(&mut self, message: Message) {
+        self.accept_messages(stream::iter(Some(message))).await;
     }
 
     fn dimensions(&self, key: &Key) -> Vec<Dimension> {
