@@ -36,6 +36,7 @@ pub struct Config {
     pub send_interval_secs: u64,
     pub client: Box<dyn CloudWatch + Send + Sync>,
     pub shutdown_signal: future::Shared<BoxFuture<'static, ()>>,
+    pub metric_buffer_size: usize,
 }
 
 struct CollectorConfig {
@@ -143,7 +144,7 @@ pub async fn init_future(config: Config) -> Result<(), Error> {
 
 pub fn new(config: Config) -> (RecorderHandle, impl Future<Output = ()>) {
     let (collect_sender, mut collect_receiver) = mpsc::channel(1024);
-    let (emit_sender, emit_receiver) = mpsc::channel(1024);
+    let (emit_sender, emit_receiver) = mpsc::channel(config.metric_buffer_size);
     let mut message_stream = Box::pin(
         stream::select(
             stream::poll_fn(move |cx| collect_receiver.poll_recv(cx)).map(Message::Datum),

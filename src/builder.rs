@@ -16,6 +16,7 @@ pub struct Builder {
     send_interval_secs: Option<u64>,
     client: Box<dyn CloudWatch + Send + Sync>,
     shutdown_signal: Option<BoxFuture<'static, ()>>,
+    metric_buffer_size: usize,
 }
 
 pub fn builder(region: rusoto_core::Region) -> Builder {
@@ -44,6 +45,7 @@ impl Builder {
             send_interval_secs: Default::default(),
             client: Box::new(client),
             shutdown_signal: Default::default(),
+            metric_buffer_size: 2048,
         }
     }
 
@@ -92,6 +94,19 @@ impl Builder {
         }
     }
 
+    /// How many metrics that may be buffered before they are dropped.
+    ///
+    /// Metrics are buffered in a channel that is consumed by the metrics task.
+    /// If there are more metrics produced than the buffer size any excess metrics will be dropped.
+    ///
+    /// Default: 2048
+    pub fn metric_buffer_size(self, metric_buffer_size: usize) -> Self {
+        Self {
+            metric_buffer_size,
+            ..self
+        }
+    }
+
     /// Initializes the CloudWatch metrics backend and runs it in a new thread
     pub fn init_thread(self) -> Result<(), Error> {
         collector::init(self.build_config()?);
@@ -114,6 +129,7 @@ impl Builder {
                 .shutdown_signal
                 .unwrap_or_else(|| Box::pin(future::pending()))
                 .shared(),
+            metric_buffer_size: self.metric_buffer_size,
         })
     }
 }
@@ -127,6 +143,7 @@ impl fmt::Debug for Builder {
             send_interval_secs,
             client: _,
             shutdown_signal: _,
+            metric_buffer_size,
         } = self;
         f.debug_struct("Builder")
             .field("cloudwatch_namespace", cloudwatch_namespace)
@@ -135,6 +152,7 @@ impl fmt::Debug for Builder {
             .field("send_interval_secs", send_interval_secs)
             .field("client", &"Box<dyn CloudWatch>")
             .field("shutdown_signal", &"BoxFuture")
+            .field("metric_buffer_size", metric_buffer_size)
             .finish()
     }
 }
