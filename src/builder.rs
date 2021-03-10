@@ -45,7 +45,7 @@ impl Builder {
             send_interval_secs: Default::default(),
             client: Box::new(client),
             shutdown_signal: Default::default(),
-            metric_buffer_size: 1024,
+            metric_buffer_size: 2048,
         }
     }
 
@@ -99,7 +99,7 @@ impl Builder {
     /// Metrics are buffered in a channel that is consumed by the metrics task.
     /// If there are more metrics produced than the buffer size any excess metrics will be dropped.
     ///
-    /// Default: 1024
+    /// Default: 2048
     pub fn metric_buffer_size(self, metric_buffer_size: usize) -> Self {
         Self {
             metric_buffer_size,
