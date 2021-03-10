@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, HashMap},
+    fmt,
     future::Future,
     mem, thread,
     time::{self, Duration, SystemTime},
@@ -179,6 +180,24 @@ pub fn new(config: Config) -> (RecorderHandle, impl Future<Output = ()>) {
     )
 }
 
+async fn retry_on_throttled<T, E, F>(
+    mut action: impl FnMut() -> F,
+) -> Result<Result<T, E>, tokio::time::error::Elapsed>
+where
+    F: Future<Output = Result<T, E>>,
+    E: fmt::Display,
+{
+    match tokio::time::timeout(SEND_TIMEOUT, action()).await {
+        Ok(Ok(t)) => Ok(Ok(t)),
+        Ok(Err(err)) if err.to_string().contains("Throttling") => {
+            tokio::time::sleep(SEND_TIMEOUT).await;
+            tokio::time::timeout(SEND_TIMEOUT, action()).await
+        }
+        Ok(Err(err)) => Ok(Err(err)),
+        Err(err) => Err(err),
+    }
+}
+
 async fn mk_emitter(
     mut emit_receiver: mpsc::Receiver<Vec<MetricDatum>>,
     cloudwatch_client: Box<dyn CloudWatch + Send + Sync>,
@@ -189,11 +208,15 @@ async fn mk_emitter(
     while let Some(metrics) = emit_receiver.recv().await {
         stream::iter(metrics_chunks(&metrics))
             .for_each(|metric_data| async move {
-                let send_fut = cloudwatch_client.put_metric_data(PutMetricDataInput {
-                    metric_data: metric_data.to_owned(),
-                    namespace: cloudwatch_namespace.clone(),
+                let send_fut = retry_on_throttled(|| async {
+                    cloudwatch_client
+                        .put_metric_data(PutMetricDataInput {
+                            metric_data: metric_data.to_owned(),
+                            namespace: cloudwatch_namespace.clone(),
+                        })
+                        .await
                 });
-                match tokio::time::timeout(SEND_TIMEOUT, send_fut).await {
+                match send_fut.await {
                     Ok(Ok(())) => log::debug!("Successfully sent a metrics batch to CloudWatch."),
                     Ok(Err(e)) => log::warn!(
                         "Failed to send metrics: {:?}: {}",
