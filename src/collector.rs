@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, HashMap},
+    convert::TryFrom,
     fmt,
     future::Future,
     mem, thread,
@@ -154,7 +155,12 @@ pub fn new(config: Config) -> (RecorderHandle, impl Future<Output = ()>) {
         .take_until(config.shutdown_signal.clone().map(|_| true)),
     );
 
-    let emitter = mk_emitter(emit_receiver, config.client, config.cloudwatch_namespace);
+    let emitter = mk_emitter(
+        emit_receiver,
+        config.client,
+        config.cloudwatch_namespace,
+        Duration::from_secs(config.send_interval_secs),
+    );
 
     let internal_config = CollectorConfig {
         default_dimensions: config.default_dimensions,
@@ -202,12 +208,20 @@ async fn mk_emitter(
     mut emit_receiver: mpsc::Receiver<Vec<MetricDatum>>,
     cloudwatch_client: Box<dyn CloudWatch + Send + Sync>,
     cloudwatch_namespace: String,
+    send_interval: Duration,
 ) {
     let cloudwatch_client = &cloudwatch_client;
     let cloudwatch_namespace = &cloudwatch_namespace;
     while let Some(metrics) = emit_receiver.recv().await {
-        stream::iter(metrics_chunks(&metrics))
+        let chunks: Vec<_> = metrics_chunks(&metrics).collect();
+        // To reduce the risk of being throttled we spread the requests out over half of
+        // the send interval
+        let sleep_duration = (send_interval / 2) / u32::try_from(chunks.len().max(1)).unwrap();
+        stream::iter(chunks)
             .for_each(|metric_data| async move {
+                // Create the future before the call so that we do not end up adding the time
+                // of the call itself to each sent batch.
+                let sleep = tokio::time::sleep(sleep_duration);
                 let send_fut = retry_on_throttled(|| async {
                     cloudwatch_client
                         .put_metric_data(PutMetricDataInput {
@@ -230,35 +244,41 @@ async fn mk_emitter(
                         log::warn!("Failed to send metrics: send timeout")
                     }
                 }
+                sleep.await;
             })
             .await;
     }
 }
 
-fn count_option_vec<T>(vs: &Option<Vec<T>>) -> usize {
-    vs.as_ref().map(|vs| vs.len()).unwrap_or(0)
-}
-
 const MAX_CW_METRICS_PUT_SIZE: usize = 37_000; // Docs say 40k but we set our max lower to be safe since we only have a heuristic
+
+fn fit_metrics<'a>(metrics: impl IntoIterator<Item = &'a MetricDatum>) -> usize {
+    let mut split = 0;
+
+    let mut current_len = 0;
+    // PutMetricData uses this really high overhead format so just take a high estimate of that.
+    //
+    // Assumes each value sent is ~60 bytes
+    // ```
+    // MetricData.member.2.Dimensions.member.2.Value=m1.small
+    // ```
+    for (i, metric) in metrics
+        .into_iter()
+        .take(MAX_CW_METRICS_PER_CALL)
+        .enumerate()
+    {
+        current_len += metric_size(metric);
+        if current_len > MAX_CW_METRICS_PUT_SIZE {
+            break;
+        }
+        split = i + 1;
+    }
+    split
+}
 
 fn metrics_chunks(mut metrics: &[MetricDatum]) -> impl Iterator<Item = &[MetricDatum]> + '_ {
     std::iter::from_fn(move || {
-        let mut split = 0;
-
-        let mut current_len = 0;
-        // PutMetricData uses this really high overhead format so just take a high estimate of that.
-        //
-        // Assumes each value sent is ~60 bytes
-        // ```
-        // MetricData.member.2.Dimensions.member.2.Value=m1.small
-        // ```
-        for (i, metric) in metrics.iter().take(MAX_CW_METRICS_PER_CALL).enumerate() {
-            current_len += metric_size(metric);
-            if current_len > MAX_CW_METRICS_PUT_SIZE {
-                break;
-            }
-            split = i + 1;
-        }
+        let split = fit_metrics(metrics);
         let (chunk, rest) = metrics.split_at(split);
         metrics = rest;
         if chunk.is_empty() {
@@ -270,6 +290,10 @@ fn metrics_chunks(mut metrics: &[MetricDatum]) -> impl Iterator<Item = &[MetricD
 }
 
 fn metric_size(metric: &MetricDatum) -> usize {
+    fn count_option_vec<T>(vs: &Option<Vec<T>>) -> usize {
+        vs.as_ref().map(|vs| vs.len()).unwrap_or(0)
+    }
+
     let MetricDatum {
         counts,
         values,
