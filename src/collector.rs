@@ -3,7 +3,9 @@ use std::{
     convert::TryFrom,
     fmt,
     future::Future,
-    mem, thread,
+    mem,
+    task::Poll,
+    thread,
     time::{self, Duration, SystemTime},
 };
 
@@ -120,7 +122,9 @@ struct HistogramDatum {
     value: f64,
 }
 
-pub struct RecorderHandle(mpsc::Sender<Datum>);
+pub struct RecorderHandle {
+    sender: mpsc::Sender<Datum>,
+}
 
 pub fn init(config: Config) {
     let _ = thread::spawn(|| {
@@ -147,7 +151,7 @@ pub async fn init_future(config: Config) -> Result<(), Error> {
 pub fn new(config: Config) -> (RecorderHandle, impl Future<Output = ()>) {
     let (collect_sender, mut collect_receiver) = mpsc::channel(1024);
     let (emit_sender, emit_receiver) = mpsc::channel(config.metric_buffer_size);
-    let mut message_stream = Box::pin(
+    let message_stream = Box::pin(
         stream::select(
             stream::poll_fn(move |cx| collect_receiver.poll_recv(cx)).map(Message::Datum),
             mk_send_batch_timer(emit_sender.clone(), &config),
@@ -169,20 +173,22 @@ pub fn new(config: Config) -> (RecorderHandle, impl Future<Output = ()>) {
 
     let mut collector = Collector::new(internal_config);
     let collection_fut = async move {
-        while let Some(msg) = message_stream.next().await {
-            collector.accept(msg);
-        }
-        // Need to drop this before flushing or we deadlock on shutdown
-        drop(message_stream);
+        collector.accept_messages(message_stream).await;
         // Send a final flush on shutdown
-        collector.accept(Message::SendBatch {
-            send_all_before: std::u64::MAX,
-            emit_sender,
-        });
+        collector
+            .accept(Message::SendBatch {
+                send_all_before: std::u64::MAX,
+                emit_sender,
+            })
+            .await;
     };
     (
-        RecorderHandle(collect_sender),
-        future::join(collection_fut, emitter.map(|_| ())).map(|_| ()),
+        RecorderHandle {
+            sender: collect_sender,
+        },
+        async move {
+            futures_util::join!(collection_fut, emitter);
+        },
     )
 }
 
@@ -364,6 +370,64 @@ fn time_key(timestamp: Timestamp, resolution: Resolution) -> Timestamp {
     }
 }
 
+fn get_timeslot<'a>(
+    metrics_data: &'a mut BTreeMap<Timestamp, HashMap<Key, Aggregate>>,
+    config: &'a CollectorConfig,
+    timestamp: Timestamp,
+) -> &'a mut HashMap<Key, Aggregate> {
+    metrics_data
+        .entry(time_key(timestamp, config.storage_resolution))
+        .or_insert_with(HashMap::new)
+}
+
+fn accept_datum(
+    slot: &mut HashMap<Key, Aggregate>,
+    metrics_config: &mut HashMap<Key, MetricConfig>,
+    datum: Datum,
+) {
+    match datum.value {
+        Value::Register { unit, description } => {
+            let metric_config = metrics_config.entry(datum.key).or_default();
+            if unit.is_some() {
+                metric_config.unit = unit;
+            }
+            if description.is_some() {
+                metric_config.description = description;
+            }
+        }
+
+        Value::Counter(value) => {
+            let aggregate = slot.entry(datum.key).or_default();
+            let counter = &mut aggregate.counter;
+            counter.sample_count += 1;
+            counter.sum += value;
+        }
+        Value::Gauge(gauge_value) => {
+            let aggregate = slot.entry(datum.key).or_default();
+
+            match &mut aggregate.gauge {
+                Some(gauge) => {
+                    gauge.current = gauge_value.update_value(gauge.current);
+                    gauge.maximum = gauge.maximum.max(gauge.current);
+                    gauge.minimum = gauge.minimum.min(gauge.current);
+                }
+                None => {
+                    let value = gauge_value.update_value(0.0);
+                    aggregate.gauge = Some(Gauge {
+                        current: value,
+                        maximum: value,
+                        minimum: value,
+                    });
+                }
+            }
+        }
+        Value::Histogram(value) => {
+            let aggregate = slot.entry(datum.key).or_default();
+            *aggregate.histogram.entry(value).or_default() += 1;
+        }
+    }
+}
+
 impl Collector {
     fn new(config: CollectorConfig) -> Self {
         Self {
@@ -373,73 +437,60 @@ impl Collector {
         }
     }
 
-    fn accept(&mut self, message: Message) {
-        let result = match message {
-            Message::Datum(datum) => Ok(self.accept_datum(datum)),
-            Message::SendBatch {
-                send_all_before,
-                emit_sender,
-            } => self.accept_send_batch(send_all_before, emit_sender),
-        };
-        if let Err(e) = result {
-            log::warn!("Failed to accept message: {}", e);
-        }
-    }
+    async fn accept_messages(&mut self, messages: impl Stream<Item = Message>) {
+        futures_util::pin_mut!(messages);
+        while let Some(message) = messages.next().await {
+            let result = async {
+                match message {
+                    Message::Datum(datum) => {
+                        let timestamp = current_timestamp();
+                        let slot = get_timeslot(&mut self.metrics_data, &self.config, timestamp);
 
-    fn accept_datum(&mut self, datum: Datum) {
-        match datum.value {
-            Value::Register { unit, description } => {
-                let metric_config = self.metrics_config.entry(datum.key).or_default();
-                if unit.is_some() {
-                    metric_config.unit = unit;
-                }
-                if description.is_some() {
-                    metric_config.description = description;
-                }
-            }
+                        accept_datum(slot, &mut self.metrics_config, datum);
 
-            Value::Counter(value) => {
-                let counter = &mut self.get_aggregate(datum.key).counter;
-                counter.sample_count += 1;
-                counter.sum += value;
-            }
-            Value::Gauge(gauge_value) => {
-                let aggregate = self.get_aggregate(datum.key);
-                match &mut aggregate.gauge {
-                    Some(gauge) => {
-                        gauge.current = gauge_value.update_value(gauge.current);
-                        gauge.maximum = gauge.maximum.max(gauge.current);
-                        gauge.minimum = gauge.minimum.min(gauge.current);
+                        // `current_timestamp` can be pretty expensive when there are a lot of
+                        // metrics so as long as we are immediately able to read more datums we
+                        // assume that we can use the same timestamp for those, thereby amortizing
+                        // the cost.
+                        // 100 is arbitrarily chosen to get good a good amount of reuse without
+                        // risking that this is always ready, thereby never updating the timestamp
+                        for _ in 0..100 {
+                            match future::lazy(|cx| messages.as_mut().poll_next(cx)).await {
+                                Poll::Ready(Some(message)) => match message {
+                                    Message::Datum(datum) => {
+                                        accept_datum(slot, &mut self.metrics_config, datum)
+                                    }
+                                    Message::SendBatch {
+                                        send_all_before,
+                                        emit_sender,
+                                    } => {
+                                        self.accept_send_batch(send_all_before, emit_sender)?;
+                                        break;
+                                    }
+                                },
+                                Poll::Ready(None) => return Ok(()),
+                                Poll::Pending => {
+                                    tokio::task::yield_now().await;
+                                    break;
+                                }
+                            }
+                        }
+                        Ok(())
                     }
-                    None => {
-                        let value = gauge_value.update_value(0.0);
-                        aggregate.gauge = Some(Gauge {
-                            current: value,
-                            maximum: value,
-                            minimum: value,
-                        });
-                    }
+                    Message::SendBatch {
+                        send_all_before,
+                        emit_sender,
+                    } => self.accept_send_batch(send_all_before, emit_sender),
                 }
-            }
-            Value::Histogram(value) => {
-                *self
-                    .get_aggregate(datum.key)
-                    .histogram
-                    .entry(value)
-                    .or_default() += 1;
+            };
+            if let Err(e) = result.await {
+                log::warn!("Failed to accept message: {}", e);
             }
         }
     }
 
-    fn get_aggregate(&mut self, key: Key) -> &mut Aggregate {
-        self.metrics_data
-            .entry(time_key(
-                current_timestamp(),
-                self.config.storage_resolution,
-            ))
-            .or_insert_with(HashMap::new)
-            .entry(key)
-            .or_default()
+    async fn accept(&mut self, message: Message) {
+        self.accept_messages(stream::iter(Some(message))).await;
     }
 
     fn dimensions(&self, key: &Key) -> Vec<Dimension> {
@@ -616,42 +667,42 @@ impl Collector {
 
 impl Recorder for RecorderHandle {
     fn register_counter(&self, key: Key, unit: Option<Unit>, description: Option<&'static str>) {
-        let _ = self.0.clone().try_send(Datum {
+        let _ = self.sender.try_send(Datum {
             key,
             value: Value::Register { unit, description },
         });
     }
 
     fn register_gauge(&self, key: Key, unit: Option<Unit>, description: Option<&'static str>) {
-        let _ = self.0.clone().try_send(Datum {
+        let _ = self.sender.try_send(Datum {
             key,
             value: Value::Register { unit, description },
         });
     }
 
     fn register_histogram(&self, key: Key, unit: Option<Unit>, description: Option<&'static str>) {
-        let _ = self.0.clone().try_send(Datum {
+        let _ = self.sender.try_send(Datum {
             key,
             value: Value::Register { unit, description },
         });
     }
 
     fn increment_counter(&self, key: Key, value: u64) {
-        let _ = self.0.clone().try_send(Datum {
+        let _ = self.sender.try_send(Datum {
             key,
             value: Value::Counter(value),
         });
     }
 
     fn update_gauge(&self, key: Key, value: GaugeValue) {
-        let _ = self.0.clone().try_send(Datum {
+        let _ = self.sender.try_send(Datum {
             key,
             value: Value::Gauge(value),
         });
     }
 
     fn record_histogram(&self, key: Key, value: f64) {
-        let _ = self.0.clone().try_send(Datum {
+        let _ = self.sender.try_send(Datum {
             key,
             value: Value::Histogram(HistogramValue::new(value).unwrap()),
         });
