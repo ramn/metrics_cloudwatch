@@ -1,3 +1,26 @@
+<a name="v0.12.5"></a>
+### v0.12.5 (2021-05-10)
+
+
+#### Features
+
+*   Double the metric buffer size ([8040fbb6](https://github.com/ramn/metrics_cloudwatch/commit/8040fbb6104240187131a4403398777f659acb87))
+*   Allow the metric channel's buffer size to be configured ([8642a767](https://github.com/ramn/metrics_cloudwatch/commit/8642a7671484dd28023af68084171b741f186240))
+
+#### Bug Fixes
+
+*   Spread each metrics batch out to reduce throttling ([337b23e7](https://github.com/ramn/metrics_cloudwatch/commit/337b23e7717f9bd61c09513a3e85e4559e7adac5))
+*   Ensure we get a fresh timestamp after the channel returns pending ([ac6092be](https://github.com/ramn/metrics_cloudwatch/commit/ac6092becff00e85b7cfdb660403765d9dfdeddd))
+*   Retry the metrics sending it gets throttled ([51eacb77](https://github.com/ramn/metrics_cloudwatch/commit/51eacb77aa482fc904c744fc2d50318198dd4622))
+
+#### Performance
+
+*   No need to clone the Sender ([3408e993](https://github.com/ramn/metrics_cloudwatch/commit/3408e99375176350be2b6f626e880c474ba17514))
+*   Amortize the timestamp lookup ([dd5de888](https://github.com/ramn/metrics_cloudwatch/commit/dd5de8880568b6eb41650fb540d81d4c3a67fde9))
+*   Amortize the cost of SystemTime::elapsed ([7ce51f90](https://github.com/ramn/metrics_cloudwatch/commit/7ce51f904f35a0db38360e46748b7ffc36b79e0c))
+
+
+
 <a name="v0.12.4"></a>
 ### v0.12.4 (2021-02-19)
 
