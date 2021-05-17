@@ -122,33 +122,39 @@ struct HistogramDatum {
     value: f64,
 }
 
-pub struct RecorderHandle {
+pub(crate) struct RecorderHandle {
     sender: mpsc::Sender<Datum>,
 }
 
-pub fn init(config: Config) {
-    let _ = thread::spawn(|| {
+pub(crate) fn init(
+    set_boxed_recorder: fn(Box<dyn Recorder>) -> Result<(), metrics::SetRecorderError>,
+    config: Config,
+) {
+    let _ = thread::spawn(move || {
         // single threaded
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
         runtime.block_on(async {
-            if let Err(e) = init_future(config).await {
+            if let Err(e) = init_future(set_boxed_recorder, config).await {
                 log::warn!("{}", e);
             }
         });
     });
 }
 
-pub async fn init_future(config: Config) -> Result<(), Error> {
+pub(crate) async fn init_future(
+    set_boxed_recorder: fn(Box<dyn Recorder>) -> Result<(), metrics::SetRecorderError>,
+    config: Config,
+) -> Result<(), Error> {
     let (recorder, task) = new(config);
-    metrics::set_boxed_recorder(Box::new(recorder)).map_err(Error::SetRecorder)?;
+    set_boxed_recorder(Box::new(recorder)).map_err(Error::SetRecorder)?;
     task.await;
     Ok(())
 }
 
-pub fn new(config: Config) -> (RecorderHandle, impl Future<Output = ()>) {
+pub(crate) fn new(config: Config) -> (RecorderHandle, impl Future<Output = ()>) {
     let (collect_sender, mut collect_receiver) = mpsc::channel(1024);
     let (emit_sender, emit_receiver) = mpsc::channel(config.metric_buffer_size);
     let message_stream = Box::pin(
