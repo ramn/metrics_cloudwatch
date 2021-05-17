@@ -7,6 +7,7 @@ pub use {
     builder::{builder, Builder},
     collector::Resolution,
     error::Error,
+    metrics,
 };
 
 use std::{borrow::Cow, future::Future, pin::Pin};

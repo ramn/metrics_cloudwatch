@@ -666,44 +666,44 @@ impl Collector {
 }
 
 impl Recorder for RecorderHandle {
-    fn register_counter(&self, key: Key, unit: Option<Unit>, description: Option<&'static str>) {
+    fn register_counter(&self, key: &Key, unit: Option<Unit>, description: Option<&'static str>) {
         let _ = self.sender.try_send(Datum {
-            key,
+            key: key.clone(),
             value: Value::Register { unit, description },
         });
     }
 
-    fn register_gauge(&self, key: Key, unit: Option<Unit>, description: Option<&'static str>) {
+    fn register_gauge(&self, key: &Key, unit: Option<Unit>, description: Option<&'static str>) {
         let _ = self.sender.try_send(Datum {
-            key,
+            key: key.clone(),
             value: Value::Register { unit, description },
         });
     }
 
-    fn register_histogram(&self, key: Key, unit: Option<Unit>, description: Option<&'static str>) {
+    fn register_histogram(&self, key: &Key, unit: Option<Unit>, description: Option<&'static str>) {
         let _ = self.sender.try_send(Datum {
-            key,
+            key: key.clone(),
             value: Value::Register { unit, description },
         });
     }
 
-    fn increment_counter(&self, key: Key, value: u64) {
+    fn increment_counter(&self, key: &Key, value: u64) {
         let _ = self.sender.try_send(Datum {
-            key,
+            key: key.clone(),
             value: Value::Counter(value),
         });
     }
 
-    fn update_gauge(&self, key: Key, value: GaugeValue) {
+    fn update_gauge(&self, key: &Key, value: GaugeValue) {
         let _ = self.sender.try_send(Datum {
-            key,
+            key: key.clone(),
             value: Value::Gauge(value),
         });
     }
 
-    fn record_histogram(&self, key: Key, value: f64) {
+    fn record_histogram(&self, key: &Key, value: f64) {
         let _ = self.sender.try_send(Datum {
-            key,
+            key: key.clone(),
             value: Value::Histogram(HistogramValue::new(value).unwrap()),
         });
     }
@@ -745,7 +745,7 @@ fn unit_cloudwatch_str(unit: &Unit) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
-    use metrics::{KeyData, Label};
+    use metrics::Label;
 
     use super::*;
 
@@ -816,14 +816,14 @@ mod tests {
             storage_resolution: Resolution::Minute,
         });
 
-        let key = Key::Owned(KeyData::from_parts(
+        let key = Key::from_parts(
             "my-metric",
             vec![
                 Label::new("zzz", "123"),
                 Label::new("first", "override-value"),
                 Label::new("aaa", "123"),
             ],
-        ));
+        );
 
         let actual = collector.dimensions(&key);
 
