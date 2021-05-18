@@ -122,7 +122,7 @@ struct HistogramDatum {
     value: f64,
 }
 
-pub(crate) struct RecorderHandle {
+pub struct RecorderHandle {
     sender: mpsc::Sender<Datum>,
 }
 
@@ -154,7 +154,7 @@ pub(crate) async fn init_future(
     Ok(())
 }
 
-pub(crate) fn new(config: Config) -> (RecorderHandle, impl Future<Output = ()>) {
+pub fn new(config: Config) -> (RecorderHandle, impl Future<Output = ()>) {
     let (collect_sender, mut collect_receiver) = mpsc::channel(1024);
     let (emit_sender, emit_receiver) = mpsc::channel(config.metric_buffer_size);
     let message_stream = Box::pin(
