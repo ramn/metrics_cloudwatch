@@ -20,7 +20,7 @@ async fn test_flush_on_shutdown() -> Result<(), Box<dyn Error>> {
             .send_interval_secs(1)
             .storage_resolution(metrics_cloudwatch::Resolution::Second)
             .shutdown_signal(Box::pin(rx.map(|_| ())))
-            .init_future(),
+            .init_future(metrics::set_boxed_recorder),
     );
     let joinhandle = tokio::spawn(backend_fut);
     tokio::time::advance(Duration::from_millis(5)).await;

@@ -107,15 +107,27 @@ impl Builder {
         }
     }
 
-    /// Initializes the CloudWatch metrics backend and runs it in a new thread
-    pub fn init_thread(self) -> Result<(), Error> {
-        collector::init(self.build_config()?);
+    /// Initializes the CloudWatch metrics backend and runs it in a new thread.
+    ///
+    /// Expects the `metrics::set_boxed_recorder` function as an argument as a safeguard against
+    /// accidentally using a different `metrics` version than is used in this crate.
+    pub fn init_thread(
+        self,
+        set_boxed_recorder: fn(Box<dyn metrics::Recorder>) -> Result<(), metrics::SetRecorderError>,
+    ) -> Result<(), Error> {
+        collector::init(set_boxed_recorder, self.build_config()?);
         Ok(())
     }
 
     /// Initializes the CloudWatch metrics and returns a Future that must be polled
-    pub async fn init_future(self) -> Result<(), Error> {
-        collector::init_future(self.build_config()?).await
+    ///
+    /// Expects the `metrics::set_boxed_recorder` function as an argument as a safeguard against
+    /// accidentally using a different `metrics` version than is used in this crate.
+    pub async fn init_future(
+        self,
+        set_boxed_recorder: fn(Box<dyn metrics::Recorder>) -> Result<(), metrics::SetRecorderError>,
+    ) -> Result<(), Error> {
+        collector::init_future(set_boxed_recorder, self.build_config()?).await
     }
 
     fn build_config(self) -> Result<Config, Error> {

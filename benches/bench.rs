@@ -38,14 +38,13 @@ fn simple(c: &mut Criterion) {
 
                     for i in 0..NUM_ENTRIES {
                         match i % 3 {
-                            0 => recorder
-                                .increment_counter(metrics::KeyData::from("counter").into(), 1),
+                            0 => recorder.increment_counter(&metrics::Key::from("counter"), 1),
                             1 => recorder.update_gauge(
-                                metrics::KeyData::from("gauge").into(),
+                                &metrics::Key::from("gauge"),
                                 metrics::GaugeValue::Absolute((i as i64 % 100) as f64),
                             ),
                             2 => recorder.record_histogram(
-                                metrics::KeyData::from("histogram").into(),
+                                &metrics::Key::from("histogram"),
                                 (i as u64 % 10) as f64,
                             ),
                             _ => unreachable!(),

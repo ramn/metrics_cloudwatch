@@ -1,5 +1,7 @@
 #![warn(rust_2018_idioms)]
 #![forbid(unsafe_code)]
+// False positives on `metrics::Key` which uses interior mutability to cache the hash
+#![allow(clippy::mutable_key_type)]
 
 pub use {rusoto_cloudwatch::CloudWatch, rusoto_core::Region};
 
@@ -7,6 +9,7 @@ pub use {
     builder::{builder, Builder},
     collector::Resolution,
     error::Error,
+    metrics,
 };
 
 use std::{borrow::Cow, future::Future, pin::Pin};
