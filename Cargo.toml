@@ -1,6 +1,6 @@
 [package]
 name = "metrics_cloudwatch"
-version = "0.12.6-alpha.0"
+version = "0.13.0"
 authors = ["ramn <github@rymdimperiet.org>"]
 edition = "2018"
 
