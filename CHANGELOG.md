@@ -1,3 +1,21 @@
+<a name="v0.13.0"></a>
+## v0.13.0 (2021-05-19)
+
+
+#### Bug Fixes
+
+*   Safeguard against using multiple versions of metrics ([8586904a](https://github.com/ramn/metrics_cloudwatch/commit/8586904a22f13783b648fce1a6751a3d77c34882))
+
+#### Breaking Changes
+
+*   Update the metrics crate to 0.15 ([c25fa9e8](https://github.com/ramn/metrics_cloudwatch/commit/c25fa9e80fbb3df3f97612d9d690b15234dc2d19), breaks [#](https://github.com/ramn/metrics_cloudwatch/issues/))
+
+#### Features
+
+*   Update the metrics crate to 0.15 ([c25fa9e8](https://github.com/ramn/metrics_cloudwatch/commit/c25fa9e80fbb3df3f97612d9d690b15234dc2d19), breaks [#](https://github.com/ramn/metrics_cloudwatch/issues/))
+
+
+
 <a name="v0.12.5"></a>
 ### v0.12.5 (2021-05-10)
 
