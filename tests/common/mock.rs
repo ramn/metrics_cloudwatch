@@ -1,5 +1,5 @@
 #![allow(unused)]
-use std::sync::Arc;
+use std::{future::Future, pin::Pin, sync::Arc};
 
 use {
     async_trait::async_trait, rusoto_cloudwatch::*, rusoto_core::RusotoError, tokio::sync::Mutex,
@@ -220,6 +220,58 @@ impl CloudWatch for MockCloudWatchClient {
         &self,
         input: PutCompositeAlarmInput,
     ) -> Result<(), RusotoError<PutCompositeAlarmError>> {
+        todo!()
+    }
+
+    async fn delete_metric_stream(
+        &self,
+        input: DeleteMetricStreamInput,
+    ) -> Result<DeleteMetricStreamOutput, RusotoError<DeleteMetricStreamError>> {
+        todo!()
+    }
+
+    async fn get_metric_stream(
+        &self,
+        input: GetMetricStreamInput,
+    ) -> Result<GetMetricStreamOutput, RusotoError<GetMetricStreamError>> {
+        todo!()
+    }
+
+    async fn list_metric_streams(
+        &self,
+        input: ListMetricStreamsInput,
+    ) -> Result<ListMetricStreamsOutput, RusotoError<ListMetricStreamsError>> {
+        todo!()
+    }
+
+    fn put_metric_stream<'life0, 'async_trait>(
+        &'life0 self,
+        input: PutMetricStreamInput,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<PutMetricStreamOutput, RusotoError<PutMetricStreamError>>>
+                + Send
+                + 'async_trait,
+        >,
+    >
+    where
+        'life0: 'async_trait,
+        Self: 'async_trait,
+    {
+        todo!()
+    }
+
+    async fn start_metric_streams(
+        &self,
+        input: StartMetricStreamsInput,
+    ) -> Result<StartMetricStreamsOutput, RusotoError<StartMetricStreamsError>> {
+        todo!()
+    }
+
+    async fn stop_metric_streams(
+        &self,
+        input: StopMetricStreamsInput,
+    ) -> Result<StopMetricStreamsOutput, RusotoError<StopMetricStreamsError>> {
         todo!()
     }
 }
