@@ -31,7 +31,7 @@ type HashMap<K, V> = std::collections::HashMap<K, V, ahash::RandomState>;
 const MAX_CW_METRICS_PER_CALL: usize = 20;
 const MAX_CLOUDWATCH_DIMENSIONS: usize = 10;
 const MAX_HISTOGRAM_VALUES: usize = 150;
-const SEND_TIMEOUT: Duration = Duration::from_secs(2);
+const SEND_TIMEOUT: Duration = Duration::from_secs(4);
 
 pub struct Config {
     pub cloudwatch_namespace: String,
