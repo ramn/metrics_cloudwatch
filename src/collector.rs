@@ -230,8 +230,10 @@ async fn mk_emitter(
         // To reduce the risk of being throttled we spread the requests out over half of
         // the send interval
         let sleep_duration = (send_interval / 2) / u32::try_from(chunks.len().max(1)).unwrap();
+        let chunks_len = chunks.len();
         stream::iter(chunks)
-            .for_each(|metric_data| async move {
+            .enumerate()
+            .for_each(|(i, metric_data)| async move {
                 // Create the future before the call so that we do not end up adding the time
                 // of the call itself to each sent batch.
                 let sleep = tokio::time::sleep(sleep_duration);
@@ -257,7 +259,10 @@ async fn mk_emitter(
                         log::warn!("Failed to send metrics: send timeout")
                     }
                 }
-                sleep.await;
+                // Don't sleep after the last chunk so we finish immediately once done
+                if i != chunks_len - 1 {
+                    sleep.await;
+                }
             })
             .await;
     }
