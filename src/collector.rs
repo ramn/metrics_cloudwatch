@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::BTreeMap,
     convert::TryFrom,
     fmt,
     future::Future,
@@ -27,6 +27,7 @@ pub type ClientBuilder = Box<dyn Fn(Region) -> Box<dyn CloudWatch + Send + Sync>
 type Count = usize;
 type HistogramValue = ordered_float::NotNan<f64>;
 type Timestamp = u64;
+type HashMap<K, V> = std::collections::HashMap<K, V, ahash::RandomState>;
 
 const MAX_CW_METRICS_PER_CALL: usize = 20;
 const MAX_CLOUDWATCH_DIMENSIONS: usize = 10;
@@ -383,7 +384,7 @@ fn get_timeslot<'a>(
 ) -> &'a mut HashMap<Key, Aggregate> {
     metrics_data
         .entry(time_key(timestamp, config.storage_resolution))
-        .or_insert_with(HashMap::new)
+        .or_default()
 }
 
 fn accept_datum(
