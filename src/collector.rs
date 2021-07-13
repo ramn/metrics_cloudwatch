@@ -1,6 +1,5 @@
 use std::{
     collections::BTreeMap,
-    convert::TryFrom,
     fmt,
     future::Future,
     mem,
@@ -166,12 +165,7 @@ pub fn new(config: Config) -> (RecorderHandle, impl Future<Output = ()>) {
         .take_until(config.shutdown_signal.clone().map(|_| true)),
     );
 
-    let emitter = mk_emitter(
-        emit_receiver,
-        config.client,
-        config.cloudwatch_namespace,
-        Duration::from_secs(config.send_interval_secs),
-    );
+    let emitter = mk_emitter(emit_receiver, config.client, config.cloudwatch_namespace);
 
     let internal_config = CollectorConfig {
         default_dimensions: config.default_dimensions,
@@ -221,22 +215,13 @@ async fn mk_emitter(
     mut emit_receiver: mpsc::Receiver<Vec<MetricDatum>>,
     cloudwatch_client: Box<dyn CloudWatch + Send + Sync>,
     cloudwatch_namespace: String,
-    send_interval: Duration,
 ) {
     let cloudwatch_client = &cloudwatch_client;
     let cloudwatch_namespace = &cloudwatch_namespace;
     while let Some(metrics) = emit_receiver.recv().await {
         let chunks: Vec<_> = metrics_chunks(&metrics).collect();
-        // To reduce the risk of being throttled we spread the requests out over half of
-        // the send interval
-        let sleep_duration = (send_interval / 2) / u32::try_from(chunks.len().max(1)).unwrap();
-        let chunks_len = chunks.len();
         stream::iter(chunks)
-            .enumerate()
-            .for_each(|(i, metric_data)| async move {
-                // Create the future before the call so that we do not end up adding the time
-                // of the call itself to each sent batch.
-                let sleep = tokio::time::sleep(sleep_duration);
+            .for_each(|metric_data| async move {
                 let send_fut = retry_on_throttled(|| async {
                     cloudwatch_client
                         .put_metric_data(PutMetricDataInput {
@@ -258,10 +243,6 @@ async fn mk_emitter(
                     Err(tokio::time::error::Elapsed { .. }) => {
                         log::warn!("Failed to send metrics: send timeout")
                     }
-                }
-                // Don't sleep after the last chunk so we finish immediately once done
-                if i != chunks_len - 1 {
-                    sleep.await;
                 }
             })
             .await;
