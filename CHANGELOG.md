@@ -1,3 +1,19 @@
+<a name="v0.14.1"></a>
+### v0.14.1 (2021-07-14)
+
+
+#### Bug Fixes
+
+*   Increase the send timeout ([d798c0a4](https://github.com/ramn/metrics_cloudwatch/commit/d798c0a45ef3bb59195b170ea8a1832ee02b9bf4))
+*   Remove the spreading out of metrics ([a48f4d24](https://github.com/ramn/metrics_cloudwatch/commit/a48f4d246b24b2a07cced86aebdf93dca04c4a06))
+*   Fix don't sleep an additional interval after the last chunk ([9e2ff884](https://github.com/ramn/metrics_cloudwatch/commit/9e2ff8849033ec749cbfe85164db53ac7c068815))
+
+#### Performance
+
+*   Use ahash for faster hashlookups ([c1e7add1](https://github.com/ramn/metrics_cloudwatch/commit/c1e7add1b8edb377ce64bce911acb22e2a6cc01f))
+
+
+
 <a name="v0.14.0"></a>
 ## v0.14.0 (2021-07-07)
 
