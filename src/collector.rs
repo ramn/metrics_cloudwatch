@@ -1,6 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap},
-    convert::TryFrom,
+    collections::BTreeMap,
     fmt,
     future::Future,
     mem,
@@ -27,11 +26,12 @@ pub type ClientBuilder = Box<dyn Fn(Region) -> Box<dyn CloudWatch + Send + Sync>
 type Count = usize;
 type HistogramValue = ordered_float::NotNan<f64>;
 type Timestamp = u64;
+type HashMap<K, V> = std::collections::HashMap<K, V, ahash::RandomState>;
 
 const MAX_CW_METRICS_PER_CALL: usize = 20;
 const MAX_CLOUDWATCH_DIMENSIONS: usize = 10;
 const MAX_HISTOGRAM_VALUES: usize = 150;
-const SEND_TIMEOUT: Duration = Duration::from_secs(2);
+const SEND_TIMEOUT: Duration = Duration::from_secs(4);
 
 pub struct Config {
     pub cloudwatch_namespace: String,
@@ -165,12 +165,7 @@ pub fn new(config: Config) -> (RecorderHandle, impl Future<Output = ()>) {
         .take_until(config.shutdown_signal.clone().map(|_| true)),
     );
 
-    let emitter = mk_emitter(
-        emit_receiver,
-        config.client,
-        config.cloudwatch_namespace,
-        Duration::from_secs(config.send_interval_secs),
-    );
+    let emitter = mk_emitter(emit_receiver, config.client, config.cloudwatch_namespace);
 
     let internal_config = CollectorConfig {
         default_dimensions: config.default_dimensions,
@@ -220,20 +215,13 @@ async fn mk_emitter(
     mut emit_receiver: mpsc::Receiver<Vec<MetricDatum>>,
     cloudwatch_client: Box<dyn CloudWatch + Send + Sync>,
     cloudwatch_namespace: String,
-    send_interval: Duration,
 ) {
     let cloudwatch_client = &cloudwatch_client;
     let cloudwatch_namespace = &cloudwatch_namespace;
     while let Some(metrics) = emit_receiver.recv().await {
         let chunks: Vec<_> = metrics_chunks(&metrics).collect();
-        // To reduce the risk of being throttled we spread the requests out over half of
-        // the send interval
-        let sleep_duration = (send_interval / 2) / u32::try_from(chunks.len().max(1)).unwrap();
         stream::iter(chunks)
             .for_each(|metric_data| async move {
-                // Create the future before the call so that we do not end up adding the time
-                // of the call itself to each sent batch.
-                let sleep = tokio::time::sleep(sleep_duration);
                 let send_fut = retry_on_throttled(|| async {
                     cloudwatch_client
                         .put_metric_data(PutMetricDataInput {
@@ -256,7 +244,6 @@ async fn mk_emitter(
                         log::warn!("Failed to send metrics: send timeout")
                     }
                 }
-                sleep.await;
             })
             .await;
     }
@@ -383,7 +370,7 @@ fn get_timeslot<'a>(
 ) -> &'a mut HashMap<Key, Aggregate> {
     metrics_data
         .entry(time_key(timestamp, config.storage_resolution))
-        .or_insert_with(HashMap::new)
+        .or_default()
 }
 
 fn accept_datum(
