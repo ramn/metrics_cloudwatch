@@ -697,7 +697,9 @@ impl Recorder for RecorderHandle {
     fn record_histogram(&self, key: &Key, value: f64) {
         let _ = self.sender.try_send(Datum {
             key: key.clone(),
-            value: Value::Histogram(HistogramValue::new(value).unwrap()),
+            value: Value::Histogram(
+                HistogramValue::new(if value.is_finite() { value } else { 0.0 }).unwrap(),
+            ),
         });
     }
 }
@@ -871,5 +873,12 @@ mod tests {
             start.checked_add(interval / 2).unwrap(),
             start.checked_add(interval + interval / 2).unwrap(),
         );
+    }
+
+    #[test]
+    fn should_handle_nan_in_record_histogram() {
+        let (sender, _receiver) = mpsc::channel(1);
+        let recorder = RecorderHandle { sender };
+        recorder.record_histogram(&Key::from_static_name("my_metric"), f64::NAN);
     }
 }
