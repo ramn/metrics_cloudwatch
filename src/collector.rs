@@ -695,12 +695,12 @@ impl Recorder for RecorderHandle {
     }
 
     fn record_histogram(&self, key: &Key, value: f64) {
-        let _ = self.sender.try_send(Datum {
-            key: key.clone(),
-            value: Value::Histogram(
-                HistogramValue::new(if value.is_finite() { value } else { 0.0 }).unwrap(),
-            ),
-        });
+        if value.is_finite() {
+            let _ = self.sender.try_send(Datum {
+                key: key.clone(),
+                value: Value::Histogram(HistogramValue::new(value).unwrap()),
+            });
+        }
     }
 }
 
