@@ -31,6 +31,7 @@ fn simple(c: &mut Criterion) {
                     client: Box::new(cloudwatch_client.clone()),
                     shutdown_signal: receiver.map(|_| ()).boxed().shared(),
                     metric_buffer_size: 1024,
+                    force_flush_stream: Some(Box::pin(futures_util::stream::empty())),
                 });
 
                 let task = tokio::spawn(task);

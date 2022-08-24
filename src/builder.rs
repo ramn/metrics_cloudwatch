@@ -1,6 +1,6 @@
-use std::{collections::BTreeMap, fmt};
+use std::{collections::BTreeMap, fmt, pin::Pin};
 
-use futures_util::{future, FutureExt};
+use futures_util::{future, FutureExt, Stream};
 use rusoto_cloudwatch::CloudWatch;
 
 use crate::{
@@ -17,6 +17,7 @@ pub struct Builder {
     client: Box<dyn CloudWatch + Send + Sync>,
     shutdown_signal: Option<BoxFuture<'static, ()>>,
     metric_buffer_size: usize,
+    force_flush_stream: Option<Pin<Box<dyn Stream<Item = ()> + Send>>>,
 }
 
 pub fn builder(region: rusoto_core::Region) -> Builder {
@@ -46,7 +47,19 @@ impl Builder {
             client: Box::new(client),
             shutdown_signal: Default::default(),
             metric_buffer_size: 2048,
+            force_flush_stream: Default::default(),
         }
+    }
+
+    /// Each time an item is produced on this stream, metrics will be force-flushed to CloudWatch.
+    /// Meaning, it will not respect the storage resolution aggregation but will send all currently
+    /// held metric data in the same way as shutdown_signal will.
+    pub fn force_flush_stream(
+        mut self,
+        force_flush_stream: Pin<Box<dyn Stream<Item = ()> + Send>>,
+    ) -> Self {
+        self.force_flush_stream = Some(force_flush_stream);
+        self
     }
 
     /// Sets the CloudWatch namespace for all metrics sent by this backend.
@@ -142,6 +155,7 @@ impl Builder {
                 .unwrap_or_else(|| Box::pin(future::pending()))
                 .shared(),
             metric_buffer_size: self.metric_buffer_size,
+            force_flush_stream: self.force_flush_stream,
         })
     }
 }
@@ -156,6 +170,7 @@ impl fmt::Debug for Builder {
             client: _,
             shutdown_signal: _,
             metric_buffer_size,
+            force_flush_stream: _,
         } = self;
         f.debug_struct("Builder")
             .field("cloudwatch_namespace", cloudwatch_namespace)
@@ -165,6 +180,7 @@ impl fmt::Debug for Builder {
             .field("client", &"Box<dyn CloudWatch>")
             .field("shutdown_signal", &"BoxFuture")
             .field("metric_buffer_size", metric_buffer_size)
+            .field("force_flush_stream", &"dyn Stream")
             .finish()
     }
 }
