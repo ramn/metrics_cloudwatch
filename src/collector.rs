@@ -3,6 +3,7 @@ use std::{
     fmt,
     future::Future,
     mem,
+    pin::Pin,
     task::Poll,
     thread,
     time::{self, Duration, SystemTime},
@@ -41,6 +42,7 @@ pub struct Config {
     pub client: Box<dyn CloudWatch + Send + Sync>,
     pub shutdown_signal: future::Shared<BoxFuture<'static, ()>>,
     pub metric_buffer_size: usize,
+    pub force_flush_stream: Option<Pin<Box<dyn Stream<Item = ()> + Send>>>,
 }
 
 struct CollectorConfig {
@@ -154,13 +156,31 @@ pub(crate) async fn init_future(
     Ok(())
 }
 
-pub fn new(config: Config) -> (RecorderHandle, impl Future<Output = ()>) {
+pub fn new(mut config: Config) -> (RecorderHandle, impl Future<Output = ()>) {
     let (collect_sender, mut collect_receiver) = mpsc::channel(1024);
     let (emit_sender, emit_receiver) = mpsc::channel(config.metric_buffer_size);
+
+    let force_flush_stream = config
+        .force_flush_stream
+        .take()
+        .unwrap_or_else(|| {
+            Box::pin(futures_util::stream::empty::<()>()) as Pin<Box<dyn Stream<Item = ()> + Send>>
+        })
+        .map({
+            let emit_sender = emit_sender.clone();
+            move |()| Message::SendBatch {
+                send_all_before: std::u64::MAX,
+                emit_sender: emit_sender.clone(),
+            }
+        });
+
     let message_stream = Box::pin(
         stream::select(
-            stream::poll_fn(move |cx| collect_receiver.poll_recv(cx)).map(Message::Datum),
-            mk_send_batch_timer(emit_sender.clone(), &config),
+            stream::select(
+                stream::poll_fn(move |cx| collect_receiver.poll_recv(cx)).map(Message::Datum),
+                mk_send_batch_timer(emit_sender.clone(), &config),
+            ),
+            force_flush_stream,
         )
         .take_until(config.shutdown_signal.clone().map(|_| true)),
     );
