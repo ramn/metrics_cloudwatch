@@ -774,7 +774,7 @@ dependencies = [
 
 [[package]]
 name = "metrics_cloudwatch"
-version = "0.14.3-alpha.0"
+version = "0.15.0"
 dependencies = [
  "ahash",
  "async-trait",
