@@ -1,3 +1,13 @@
+<a name="v0.15.0"></a>
+## v0.15.0 (2022-08-25)
+
+#### Bug fixes
+*   Only record value if it is finite
+
+#### Features
+*   Add option for force-flushing metrics
+
+
 <a name="v0.14.1"></a>
 ### v0.14.1 (2021-07-14)
 
