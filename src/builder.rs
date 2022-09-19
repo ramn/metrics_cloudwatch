@@ -2,6 +2,7 @@ use std::{collections::BTreeMap, fmt, pin::Pin};
 
 use futures_util::{future, FutureExt, Stream};
 use rusoto_cloudwatch::CloudWatch;
+use tokio::sync::oneshot;
 
 use crate::{
     collector::{self, Config, Resolution},
@@ -17,7 +18,7 @@ pub struct Builder {
     client: Box<dyn CloudWatch + Send + Sync>,
     shutdown_signal: Option<BoxFuture<'static, ()>>,
     metric_buffer_size: usize,
-    force_flush_stream: Option<Pin<Box<dyn Stream<Item = ()> + Send>>>,
+    force_flush_stream: Option<Pin<Box<dyn Stream<Item = Option<oneshot::Sender<()>>> + Send>>>,
 }
 
 pub fn builder(region: rusoto_core::Region) -> Builder {
@@ -56,7 +57,7 @@ impl Builder {
     /// held metric data in the same way as shutdown_signal will.
     pub fn force_flush_stream(
         mut self,
-        force_flush_stream: Pin<Box<dyn Stream<Item = ()> + Send>>,
+        force_flush_stream: Pin<Box<dyn Stream<Item = Option<oneshot::Sender<()>>> + Send>>,
     ) -> Self {
         self.force_flush_stream = Some(force_flush_stream);
         self
