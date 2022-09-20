@@ -18,7 +18,7 @@ use {
     metrics::{GaugeValue, Key, Recorder, Unit},
     rusoto_cloudwatch::{CloudWatch, Dimension, MetricDatum, PutMetricDataInput, StatisticSet},
     rusoto_core::Region,
-    tokio::sync::mpsc,
+    tokio::sync::{mpsc, oneshot},
 };
 
 use crate::{error::Error, BoxFuture};
@@ -42,7 +42,7 @@ pub struct Config {
     pub client: Box<dyn CloudWatch + Send + Sync>,
     pub shutdown_signal: future::Shared<BoxFuture<'static, ()>>,
     pub metric_buffer_size: usize,
-    pub force_flush_stream: Option<Pin<Box<dyn Stream<Item = ()> + Send>>>,
+    pub force_flush_stream: Option<Pin<Box<dyn Stream<Item = Option<oneshot::Sender<()>>> + Send>>>,
 }
 
 struct CollectorConfig {
@@ -60,7 +60,8 @@ enum Message {
     Datum(Datum),
     SendBatch {
         send_all_before: Timestamp,
-        emit_sender: mpsc::Sender<Vec<MetricDatum>>,
+        emit_sender: mpsc::Sender<(Vec<MetricDatum>, Option<oneshot::Sender<()>>)>,
+        flush_signal: Option<oneshot::Sender<()>>,
     },
 }
 
@@ -164,13 +165,14 @@ pub fn new(mut config: Config) -> (RecorderHandle, impl Future<Output = ()>) {
         .force_flush_stream
         .take()
         .unwrap_or_else(|| {
-            Box::pin(futures_util::stream::empty::<()>()) as Pin<Box<dyn Stream<Item = ()> + Send>>
+            Box::pin(futures_util::stream::empty::<Option<oneshot::Sender<()>>>()) as Pin<Box<dyn Stream<Item = Option<oneshot::Sender<()>>> + Send>>
         })
         .map({
             let emit_sender = emit_sender.clone();
-            move |()| Message::SendBatch {
+            move |signal| Message::SendBatch {
                 send_all_before: std::u64::MAX,
                 emit_sender: emit_sender.clone(),
+                flush_signal: signal,
             }
         });
 
@@ -200,6 +202,7 @@ pub fn new(mut config: Config) -> (RecorderHandle, impl Future<Output = ()>) {
             .accept(Message::SendBatch {
                 send_all_before: std::u64::MAX,
                 emit_sender,
+                flush_signal: None,
             })
             .await;
     };
@@ -232,13 +235,13 @@ where
 }
 
 async fn mk_emitter(
-    mut emit_receiver: mpsc::Receiver<Vec<MetricDatum>>,
+    mut emit_receiver: mpsc::Receiver<(Vec<MetricDatum>, Option<oneshot::Sender<()>>)>,
     cloudwatch_client: Box<dyn CloudWatch + Send + Sync>,
     cloudwatch_namespace: String,
 ) {
     let cloudwatch_client = &cloudwatch_client;
     let cloudwatch_namespace = &cloudwatch_namespace;
-    while let Some(metrics) = emit_receiver.recv().await {
+    while let Some((metrics, flush_signal)) = emit_receiver.recv().await {
         let chunks: Vec<_> = metrics_chunks(&metrics).collect();
         stream::iter(chunks)
             .for_each(|metric_data| async move {
@@ -261,11 +264,17 @@ async fn mk_emitter(
                         e,
                     ),
                     Err(tokio::time::error::Elapsed { .. }) => {
-                        log::warn!("Failed to send metrics: send timeout")
+                        log::warn!("Failed to send metrics: send timeout");
                     }
                 }
             })
             .await;
+        
+        if let Some(signal) = flush_signal {
+            if let Err(_) = signal.send(()) {
+                log::warn!("Unable to send flush complete signal");
+            }
+        }
     }
 }
 
@@ -353,7 +362,7 @@ fn jitter_interval_at(
 }
 
 fn mk_send_batch_timer(
-    emit_sender: mpsc::Sender<Vec<MetricDatum>>,
+    emit_sender: mpsc::Sender<(Vec<MetricDatum>, Option<oneshot::Sender<()>>)>,
     config: &Config,
 ) -> impl Stream<Item = Message> {
     let interval = Duration::from_secs(config.send_interval_secs);
@@ -363,6 +372,7 @@ fn mk_send_batch_timer(
         Message::SendBatch {
             send_all_before,
             emit_sender: emit_sender.clone(),
+            flush_signal: None,
         }
     })
 }
@@ -476,8 +486,9 @@ impl Collector {
                                     Message::SendBatch {
                                         send_all_before,
                                         emit_sender,
+                                        flush_signal,
                                     } => {
-                                        self.accept_send_batch(send_all_before, emit_sender)?;
+                                        self.accept_send_batch(send_all_before, emit_sender, flush_signal)?;
                                         break;
                                     }
                                 },
@@ -493,7 +504,8 @@ impl Collector {
                     Message::SendBatch {
                         send_all_before,
                         emit_sender,
-                    } => self.accept_send_batch(send_all_before, emit_sender),
+                        flush_signal,
+                    } => self.accept_send_batch(send_all_before, emit_sender, flush_signal),
                 }
             };
             if let Err(e) = result.await {
@@ -550,12 +562,13 @@ impl Collector {
     fn accept_send_batch(
         &mut self,
         send_all_before: Timestamp,
-        emit_sender: mpsc::Sender<Vec<MetricDatum>>,
+        emit_sender: mpsc::Sender<(Vec<MetricDatum>, Option<oneshot::Sender<()>>)>,
+        flush_signal: Option<oneshot::Sender<()>>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut range = self.metrics_data.split_off(&send_all_before);
         mem::swap(&mut range, &mut self.metrics_data);
 
-        let mut metrics_batch = vec![];
+        let mut metrics_batch = (vec![], flush_signal);
 
         for (timestamp, stats_by_key) in range {
             let timestamp = timestamp_string(time::UNIX_EPOCH + Duration::from_secs(timestamp));
@@ -609,7 +622,7 @@ impl Collector {
                         maximum: sum,
                         minimum: sum,
                     };
-                    metrics_batch.push(stats_set_datum(stats_set, unit.or(Some("Count"))));
+                    metrics_batch.0.push(stats_set_datum(stats_set, unit.or(Some("Count"))));
                 }
 
                 if let Some(Gauge {
@@ -625,7 +638,7 @@ impl Collector {
                         minimum,
                         maximum,
                     };
-                    metrics_batch.push(stats_set_datum(statistic_set, unit));
+                    metrics_batch.0.push(stats_set_datum(statistic_set, unit));
                 }
 
                 let histogram_datum = &mut |Histogram { values, counts }, unit| MetricDatum {
@@ -656,12 +669,12 @@ impl Collector {
                         if histogram.values.is_empty() {
                             break;
                         };
-                        metrics_batch.push(histogram_datum(histogram, unit.map(|s| s.into())));
+                        metrics_batch.0.push(histogram_datum(histogram, unit.map(|s| s.into())));
                     }
                 }
             }
         }
-        if !metrics_batch.is_empty() {
+        if !metrics_batch.0.is_empty() {
             emit_sender.try_send(metrics_batch)?;
         }
         Ok(())
