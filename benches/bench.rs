@@ -60,13 +60,13 @@ fn simple(c: &mut Criterion) {
                 shutdown_sender.send(()).unwrap();
                 task.await.unwrap();
 
-                let put_metric_data = cloudwatch_client.put_metric_data.lock().await;
+                let put_metric_data = cloudwatch_client.put_metric_data.lock().unwrap();
                 assert_eq!(
                     put_metric_data
                         .iter()
-                        .flat_map(|m| m.metric_data.iter())
-                        .filter(|data| data.metric_name == "counter")
-                        .map(|counter| counter.statistic_values.as_ref().unwrap().sum)
+                        .flat_map(|m| m.metric_data.as_ref().unwrap().iter())
+                        .filter(|data| data.metric_name() == Some("counter"))
+                        .map(|counter| counter.statistic_values().as_ref().unwrap().sum().unwrap())
                         .sum::<f64>(),
                     (NUM_ENTRIES as f64 / 3.0).round(),
                     "{:#?}",

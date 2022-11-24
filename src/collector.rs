@@ -10,28 +10,58 @@ use std::{
 };
 
 use {
+    aws_sdk_cloudwatch::{
+        error::PutMetricDataError,
+        model::{Dimension, MetricDatum, StandardUnit, StatisticSet},
+        types::{DateTime, SdkError},
+        Client,
+    },
     futures_util::{
         future,
         stream::{self, Stream},
         FutureExt, StreamExt,
     },
     metrics::{GaugeValue, Key, Recorder, Unit},
-    rusoto_cloudwatch::{CloudWatch, Dimension, MetricDatum, PutMetricDataInput, StatisticSet},
-    rusoto_core::Region,
     tokio::sync::mpsc,
 };
 
 use crate::{error::Error, BoxFuture};
 
-pub type ClientBuilder = Box<dyn Fn(Region) -> Box<dyn CloudWatch + Send + Sync> + Send + Sync>;
+pub trait CloudWatch {
+    fn put_metric_data(
+        &self,
+        namespace: String,
+        data: Vec<MetricDatum>,
+    ) -> BoxFuture<'_, Result<(), SdkError<PutMetricDataError>>>;
+}
+
+impl CloudWatch for Client {
+    fn put_metric_data(
+        &self,
+        namespace: String,
+        data: Vec<MetricDatum>,
+    ) -> BoxFuture<'_, Result<(), SdkError<PutMetricDataError>>> {
+        let put = self.put_metric_data();
+        async move {
+            put.namespace(namespace)
+                .set_metric_data(Some(data))
+                .send()
+                .await
+                .map(|_| ())
+        }
+        .boxed()
+    }
+}
+
 type Count = usize;
 type HistogramValue = ordered_float::NotNan<f64>;
 type Timestamp = u64;
 type HashMap<K, V> = std::collections::HashMap<K, V, ahash::RandomState>;
 
-const MAX_CW_METRICS_PER_CALL: usize = 20;
-const MAX_CLOUDWATCH_DIMENSIONS: usize = 10;
+const MAX_CW_METRICS_PER_CALL: usize = 1000;
+const MAX_CLOUDWATCH_DIMENSIONS: usize = 30;
 const MAX_HISTOGRAM_VALUES: usize = 150;
+const MAX_CW_METRICS_PUT_SIZE: usize = 800_000; // Docs say 1Mb but we set our max lower to be safe since we only have a heuristic
 const SEND_TIMEOUT: Duration = Duration::from_secs(4);
 
 pub struct Config {
@@ -138,7 +168,7 @@ pub(crate) fn init(
             .enable_all()
             .build()
             .unwrap();
-        runtime.block_on(async {
+        runtime.block_on(async move {
             if let Err(e) = init_future(set_boxed_recorder, config).await {
                 log::warn!("{}", e);
             }
@@ -244,14 +274,13 @@ async fn mk_emitter(
             .for_each(|metric_data| async move {
                 let send_fut = retry_on_throttled(|| async {
                     cloudwatch_client
-                        .put_metric_data(PutMetricDataInput {
-                            metric_data: metric_data.to_owned(),
-                            namespace: cloudwatch_namespace.clone(),
-                        })
+                        .put_metric_data(cloudwatch_namespace.clone(), metric_data.to_owned())
                         .await
                 });
                 match send_fut.await {
-                    Ok(Ok(())) => log::debug!("Successfully sent a metrics batch to CloudWatch."),
+                    Ok(Ok(_output)) => {
+                        log::debug!("Successfully sent a metrics batch to CloudWatch.")
+                    }
                     Ok(Err(e)) => log::warn!(
                         "Failed to send metrics: {:?}: {}",
                         metric_data
@@ -268,8 +297,6 @@ async fn mk_emitter(
             .await;
     }
 }
-
-const MAX_CW_METRICS_PUT_SIZE: usize = 37_000; // Docs say 40k but we set our max lower to be safe since we only have a heuristic
 
 fn fit_metrics<'a>(metrics: impl IntoIterator<Item = &'a MetricDatum>) -> usize {
     let mut split = 0;
@@ -309,25 +336,15 @@ fn metrics_chunks(mut metrics: &[MetricDatum]) -> impl Iterator<Item = &[MetricD
 }
 
 fn metric_size(metric: &MetricDatum) -> usize {
-    fn count_option_vec<T>(vs: &Option<Vec<T>>) -> usize {
+    fn count_option_vec<T>(vs: &Option<&[T]>) -> usize {
         vs.as_ref().map(|vs| vs.len()).unwrap_or(0)
     }
 
-    let MetricDatum {
-        counts,
-        values,
-        dimensions,
-        // 6 fields
-        metric_name: _,
-        statistic_values: _,
-        storage_resolution: _,
-        timestamp: _,
-        unit: _,
-        value: _,
-    } = metric;
     60 * (
         // The 6 non Vec fields
-        6 + count_option_vec(values) + count_option_vec(counts) + count_option_vec(dimensions)
+        6 + count_option_vec(&metric.values())
+            + count_option_vec(&metric.counts())
+            + count_option_vec(&metric.dimensions())
     )
 }
 
@@ -371,9 +388,10 @@ fn current_timestamp() -> Timestamp {
     time::UNIX_EPOCH.elapsed().unwrap().as_secs()
 }
 
-fn timestamp_string(now: SystemTime) -> String {
+fn datetime(now: SystemTime) -> DateTime {
+    use aws_smithy_types_convert::date_time::DateTimeExt;
     let dt = chrono::DateTime::<chrono::offset::Utc>::from(now);
-    dt.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+    DateTime::from_chrono_utc(dt)
 }
 
 fn time_key(timestamp: Timestamp, resolution: Resolution) -> Timestamp {
@@ -510,10 +528,7 @@ impl Collector {
         let mut dimensions_from_keys = key
             .labels()
             .filter(|l| !l.key().starts_with('@'))
-            .map(|l| Dimension {
-                name: l.key().to_owned(),
-                value: l.value().to_owned(),
-            })
+            .map(|l| Dimension::builder().name(l.key()).value(l.value()).build())
             .peekable();
 
         let has_extra_dimensions = dimensions_from_keys.peek().is_some();
@@ -529,7 +544,7 @@ impl Collector {
             all_dims.sort_by(|a, b| a.name.cmp(&b.name));
             all_dims.dedup_by(|a, b| a.name == b.name);
         }
-        all_dims.retain(|dim| !dim.value.is_empty());
+        all_dims.retain(|dim| !dim.value().unwrap_or("").is_empty());
 
         if all_dims.len() > MAX_CLOUDWATCH_DIMENSIONS {
             all_dims.truncate(MAX_CLOUDWATCH_DIMENSIONS);
@@ -558,7 +573,7 @@ impl Collector {
         let mut metrics_batch = vec![];
 
         for (timestamp, stats_by_key) in range {
-            let timestamp = timestamp_string(time::UNIX_EPOCH + Duration::from_secs(timestamp));
+            let timestamp = datetime(time::UNIX_EPOCH + Duration::from_secs(timestamp));
 
             for (key, aggregate) in stats_by_key {
                 let Aggregate {
@@ -572,44 +587,33 @@ impl Collector {
                     .get(&key)
                     .and_then(|metric_config| metric_config.unit.as_ref())
                     .and_then(unit_cloudwatch_str)
-                    .or_else(|| key.labels().find(|l| l.key() == "@unit").map(|l| l.value()));
+                    .or_else(|| key.labels().find(|l| l.key() == "@unit").map(|l| l.value()))
+                    .map(StandardUnit::from);
 
-                let stats_set_datum = &mut |stats_set, unit: Option<&str>| MetricDatum {
-                    dimensions: Some(dimensions.clone()),
-                    metric_name: key.name().to_string(),
-                    timestamp: Some(timestamp.clone()),
-                    storage_resolution: Some(self.config.storage_resolution.as_secs()),
-                    statistic_values: Some(stats_set),
-                    unit: unit.map(|s| s.into()),
-                    ..Default::default()
+                let stats_set_datum = &mut |stats_set, unit: &Option<StandardUnit>| {
+                    MetricDatum::builder()
+                        .set_dimensions(Some(dimensions.clone()))
+                        .metric_name(key.name())
+                        .timestamp(timestamp)
+                        .storage_resolution(self.config.storage_resolution.as_secs() as i32)
+                        .statistic_values(stats_set)
+                        .set_unit(unit.clone())
+                        .build()
                 };
 
                 if counter.sample_count > 0 {
                     let sum = counter.sum as f64;
-                    let stats_set = StatisticSet {
-                        // We aren't interested in how many `counter!` calls we did so we put 1
-                        // here to allow cloudwatch to display the average between this and any
-                        // other instances posting to the same metric.
-                        sample_count: 1.0,
-                        sum,
-                        // Max and min for a count can either be the sum or the max/min of the
-                        // value passed to each `increment_counter` call.
-                        //
-                        // In the case where we only increment by `1` each call the latter makes
-                        // min and max basically useless since the end result will leave both as `1`.
-                        // In the case where we sum the count first before calling
-                        // `increment_counter` we do lose some granularity as the latter would give
-                        // a spread in min/max.
-                        // However if that is an interesting metric it would often be
-                        // better modeled as the gauge (measuring how much were processed in each
-                        // batch).
-                        //
-                        // Therefor we opt to send the sum to give a measure of how many
-                        // counts *this* metrics instance observed in this time period.
-                        maximum: sum,
-                        minimum: sum,
-                    };
-                    metrics_batch.push(stats_set_datum(stats_set, unit.or(Some("Count"))));
+                    let stats_set = StatisticSet::builder()
+                        .sample_count(1.0)
+                        .sum(sum)
+                        .maximum(sum)
+                        .minimum(sum)
+                        .build();
+
+                    metrics_batch.push(stats_set_datum(
+                        stats_set,
+                        &unit.clone().or(Some(StandardUnit::Count)),
+                    ));
                 }
 
                 if let Some(Gauge {
@@ -619,25 +623,28 @@ impl Collector {
                 }) = gauge
                 {
                     // Gauges only submit the current value and the max and min
-                    let statistic_set = StatisticSet {
-                        sample_count: 1.0,
-                        sum: current,
-                        minimum,
-                        maximum,
-                    };
-                    metrics_batch.push(stats_set_datum(statistic_set, unit));
+                    let statistic_set = StatisticSet::builder()
+                        .sample_count(1.0)
+                        .sum(current)
+                        .maximum(maximum)
+                        .minimum(minimum)
+                        .build();
+
+                    metrics_batch.push(stats_set_datum(statistic_set, &unit));
                 }
 
-                let histogram_datum = &mut |Histogram { values, counts }, unit| MetricDatum {
-                    dimensions: Some(dimensions.clone()),
-                    metric_name: key.name().to_string(),
-                    timestamp: Some(timestamp.clone()),
-                    storage_resolution: Some(self.config.storage_resolution.as_secs()),
-                    unit,
-                    values: Some(values),
-                    counts: Some(counts),
-                    ..Default::default()
-                };
+                let histogram_datum =
+                    &mut |Histogram { values, counts }, unit: &Option<StandardUnit>| {
+                        MetricDatum::builder()
+                            .metric_name(key.name())
+                            .timestamp(timestamp)
+                            .storage_resolution(self.config.storage_resolution.as_secs() as i32)
+                            .set_dimensions(Some(dimensions.clone()))
+                            .set_unit(unit.clone())
+                            .set_values(Some(values))
+                            .set_counts(Some(counts))
+                            .build()
+                    };
 
                 if !histogram.is_empty() {
                     let histogram_data = &mut histogram.into_iter().map(|(k, v)| HistogramDatum {
@@ -656,7 +663,7 @@ impl Collector {
                         if histogram.values.is_empty() {
                             break;
                         };
-                        metrics_batch.push(histogram_datum(histogram, unit.map(|s| s.into())));
+                        metrics_batch.push(histogram_datum(histogram, &unit));
                     }
                 }
             }
@@ -671,10 +678,7 @@ impl Collector {
         self.config
             .default_dimensions
             .iter()
-            .map(|(name, value)| Dimension {
-                name: name.to_owned(),
-                value: value.to_owned(),
-            })
+            .map(|(name, value)| Dimension::builder().name(name).value(value).build())
     }
 }
 
@@ -765,7 +769,9 @@ mod tests {
     use super::*;
 
     use proptest::prelude::*;
-
+    fn dim(name: &str, value: &str) -> Dimension {
+        Dimension::builder().name(name).value(value).build()
+    }
     #[test]
     fn time_key_should_truncate() {
         assert_eq!(time_key(370, Resolution::Second), 370);
@@ -777,26 +783,27 @@ mod tests {
             proptest::collection::vec(proptest::num::f64::ANY, 1..MAX_HISTOGRAM_VALUES)
                 .prop_map(Some)
         };
-        let timestamp = timestamp_string(time::UNIX_EPOCH);
+        let timestamp = datetime(time::UNIX_EPOCH);
         let datum = (
             values(),
             values(),
             proptest::collection::vec(
-                ("name", "value").prop_map(|(name, value)| Dimension { name, value }),
+                ("name", "value").prop_map(|(name, value)| dim(&name, &value)),
                 1..6,
             )
             .prop_map(Some),
         )
-            .prop_map(move |(counts, values, dimensions)| MetricDatum {
-                counts,
-                values,
-                dimensions,
-                metric_name: "test".into(),
-                statistic_values: Some(StatisticSet::default()),
-                storage_resolution: Some(1),
-                timestamp: Some(timestamp.clone()),
-                value: Some(1.0),
-                unit: Some("Count".into()),
+            .prop_map(move |(counts, values, dimensions)| {
+                MetricDatum::builder()
+                    .set_counts(counts)
+                    .set_values(values)
+                    .set_dimensions(dimensions)
+                    .metric_name("test")
+                    .timestamp(timestamp)
+                    .storage_resolution(1)
+                    .statistic_values(StatisticSet::builder().build())
+                    .unit(StandardUnit::Count)
+                    .build()
             });
 
         proptest::collection::vec(datum, 1..100)
@@ -841,26 +848,14 @@ mod tests {
         );
 
         let actual = collector.dimensions(&key);
-
+        let dim = |name, value| Dimension::builder().name(name).value(value).build();
         assert_eq!(
             actual,
             vec![
-                Dimension {
-                    name: "aaa".into(),
-                    value: "123".into()
-                },
-                Dimension {
-                    name: "first".into(),
-                    value: "override-value".into()
-                },
-                Dimension {
-                    name: "second".into(),
-                    value: "123".into()
-                },
-                Dimension {
-                    name: "zzz".into(),
-                    value: "123".into()
-                },
+                dim("aaa", "123"),
+                dim("first", "override-value"),
+                dim("second", "123"),
+                dim("zzz", "123")
             ],
         );
     }
