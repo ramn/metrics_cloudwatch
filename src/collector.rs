@@ -604,8 +604,25 @@ impl Collector {
                 if counter.sample_count > 0 {
                     let sum = counter.sum as f64;
                     let stats_set = StatisticSet::builder()
+                        // We aren't interested in how many `counter!` calls we did so we put 1
+                        // here to allow cloudwatch to display the average between this and any
+                        // other instances posting to the same metric.
                         .sample_count(1.0)
                         .sum(sum)
+                        // Max and min for a count can either be the sum or the max/min of the
+                        // value passed to each `increment_counter` call.
+                        //
+                        // In the case where we only increment by `1` each call the latter makes
+                        // min and max basically useless since the end result will leave both as `1`.
+                        // In the case where we sum the count first before calling
+                        // `increment_counter` we do lose some granularity as the latter would give
+                        // a spread in min/max.
+                        // However if that is an interesting metric it would often be
+                        // better modeled as the gauge (measuring how much were processed in each
+                        // batch).
+                        //
+                        // Therefor we opt to send the sum to give a measure of how many
+                        // counts *this* metrics instance observed in this time period.
                         .maximum(sum)
                         .minimum(sum)
                         .build();
