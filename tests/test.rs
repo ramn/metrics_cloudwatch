@@ -1,11 +1,15 @@
 use std::{error::Error, time::Duration};
 
+use aws_sdk_cloudwatch::model::{Dimension, StandardUnit, StatisticSet};
 use futures_util::FutureExt;
-use rusoto_cloudwatch::{Dimension, StatisticSet};
 
 use common::MockCloudWatchClient;
 
 mod common;
+
+fn dim(name: &str, value: &str) -> Dimension {
+    Dimension::builder().name(name).value(value).build()
+}
 
 #[tokio::test]
 async fn test_flush_on_shutdown() -> Result<(), Box<dyn Error>> {
@@ -43,103 +47,87 @@ async fn test_flush_on_shutdown() -> Result<(), Box<dyn Error>> {
     tx.send(()).unwrap();
     joinhandle.await??;
 
-    let actual = client.put_metric_data.lock().await;
+    let actual = client.put_metric_data.lock().unwrap();
     assert_eq!(actual.len(), 1);
 
-    let metric_data = &actual[0].metric_data;
+    let metric_data = actual[0].metric_data.as_ref().unwrap();
 
     assert_eq!(metric_data.len(), 7);
     let value_metric = metric_data
         .iter()
-        .find(|m| m.metric_name == "test" && m.counts.as_ref().unwrap().len() == 150)
+        .find(|m| m.metric_name() == Some("test") && m.counts.as_ref().unwrap().len() == 150)
         .unwrap();
     assert_eq!(value_metric.counts.as_ref().unwrap().len(), 150);
     assert_eq!(value_metric.values.as_ref().unwrap().len(), 150);
     assert_eq!(
         value_metric.dimensions,
-        Some(vec![Dimension {
-            name: "dimension".into(),
-            value: "default".into()
-        }])
+        Some(vec![dim("dimension", "default")])
     );
 
     let dim_metric = metric_data
         .iter()
-        .find(|m| m.metric_name == "labels")
+        .find(|m| m.metric_name() == Some("labels"))
         .unwrap();
     assert_eq!(
         dim_metric.dimensions,
-        Some(vec![
-            Dimension {
-                name: "dimension".into(),
-                value: "default".into()
-            },
-            Dimension {
-                name: "label".into(),
-                value: "1".into()
-            }
-        ])
+        Some(vec![dim("dimension", "default"), dim("label", "1")])
     );
 
     let dim_metric2 = metric_data
         .iter()
-        .find(|m| m.metric_name == "labels2")
+        .find(|m| m.metric_name() == Some("labels2"))
         .unwrap();
-    assert_eq!(
-        dim_metric2.dimensions,
-        Some(vec![Dimension {
-            name: "label".into(),
-            value: "1".into()
-        }])
-    );
+    assert_eq!(dim_metric2.dimensions, Some(vec![dim("label", "1")]));
 
     let count_metric = metric_data
         .iter()
-        .find(|m| m.metric_name == "test" && m.counts.as_ref().unwrap().len() == 1)
+        .find(|m| m.metric_name() == Some("test") && m.counts.as_ref().unwrap().len() == 1)
         .unwrap();
     assert_eq!(count_metric.counts.as_ref().unwrap().len(), 1);
     assert_eq!(count_metric.values.as_ref().unwrap().len(), 1);
     assert_eq!(
         value_metric.dimensions,
-        Some(vec![Dimension {
-            name: "dimension".into(),
-            value: "default".into()
-        }])
+        Some(vec![dim("dimension", "default")])
     );
 
     let count_data = metric_data
         .iter()
-        .find(|m| m.metric_name == "count")
+        .find(|m| m.metric_name() == Some("count"))
         .unwrap();
+
     assert_eq!(
         count_data.statistic_values,
-        Some(StatisticSet {
-            sample_count: 1.0,
-            sum: 150.0,
-            maximum: 150.0,
-            minimum: 150.0
-        })
+        Some(
+            StatisticSet::builder()
+                .sample_count(1.0)
+                .sum(150.0)
+                .maximum(150.0)
+                .minimum(150.0)
+                .build()
+        )
     );
 
     let bytes_data = metric_data
         .iter()
-        .find(|m| m.metric_name == "bytes")
+        .find(|m| m.metric_name() == Some("bytes"))
         .unwrap();
-    assert_eq!(bytes_data.unit, Some("Bytes".to_string()));
+    assert_eq!(bytes_data.unit(), Some(&StandardUnit::Bytes));
 
     let count_data = metric_data
         .iter()
-        .find(|m| m.metric_name == "gauge")
+        .find(|m| m.metric_name() == Some("gauge"))
         .unwrap();
+
     assert_eq!(
         count_data.statistic_values,
-        Some(StatisticSet {
-            sample_count: 1.0,
-            // The last value submitted
-            sum: 200.0,
-            minimum: 100.0,
-            maximum: 200.0,
-        })
+        Some(
+            StatisticSet::builder()
+                .sample_count(1.0)
+                .sum(200.0)
+                .maximum(200.0)
+                .minimum(100.0)
+                .build()
+        )
     );
 
     Ok(())

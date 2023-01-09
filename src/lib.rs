@@ -3,8 +3,6 @@
 // False positives on `metrics::Key` which uses interior mutability to cache the hash
 #![allow(clippy::mutable_key_type)]
 
-pub use {rusoto_cloudwatch::CloudWatch, rusoto_core::Region};
-
 pub use {
     builder::{builder, Builder},
     collector::Resolution,

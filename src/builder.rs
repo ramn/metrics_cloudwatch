@@ -1,10 +1,11 @@
 use std::{collections::BTreeMap, fmt, pin::Pin};
 
+use aws_config::SdkConfig;
+use aws_sdk_cloudwatch::Client;
 use futures_util::{future, FutureExt, Stream};
-use rusoto_cloudwatch::CloudWatch;
 
 use crate::{
-    collector::{self, Config, Resolution},
+    collector::{self, CloudWatch, Config, Resolution},
     error::Error,
     BoxFuture,
 };
@@ -20,8 +21,8 @@ pub struct Builder {
     force_flush_stream: Option<Pin<Box<dyn Stream<Item = ()> + Send>>>,
 }
 
-pub fn builder(region: rusoto_core::Region) -> Builder {
-    Builder::new(region)
+pub fn builder(config: &SdkConfig) -> Builder {
+    Builder::new(config)
 }
 
 fn extract_namespace(cloudwatch_namespace: Option<String>) -> Result<String, Error> {
@@ -34,8 +35,9 @@ fn extract_namespace(cloudwatch_namespace: Option<String>) -> Result<String, Err
 }
 
 impl Builder {
-    pub fn new(region: rusoto_core::Region) -> Self {
-        Self::new_with(rusoto_cloudwatch::CloudWatchClient::new(region))
+    pub fn new(config: &SdkConfig) -> Self {
+        let client = Client::new(config);
+        Self::new_with(client)
     }
 
     pub fn new_with(client: impl CloudWatch + Send + Sync + 'static) -> Self {
