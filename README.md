@@ -14,9 +14,9 @@ crate](https://crates.io/crates/metrics), pushing metrics to CloudWatch.
 How to use
 ----------
 
-Credentials for AWS needs to be available in the environment, see [Rusoto docs
-on AWS credentials](
-https://github.com/rusoto/rusoto/blob/master/AWS-CREDENTIALS.md)
+Credentials for AWS needs to be available in the environment, see [AWS docs
+on setting up AWS credentials](
+https://github.com/awslabs/aws-sdk-rust#getting-started-with-the-sdk)
 
 ```bash
 cargo add -s metrics metrics_cloudwatch
@@ -57,7 +57,7 @@ Limitations
 
 The CloudWatch metrics API imposes some limitations.
 
-* Max 10 labels (dimensions) per metric
+* Max 30 labels (dimensions) per metric
 * Max 150 unique histogram values (used by `timing!()` and `value!()`) per API
 call. Going beyond this works but will incur one API call per batch of 150
 unique values. Could be a good idea to measure timing in milliseconds rather
