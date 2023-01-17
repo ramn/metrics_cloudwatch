@@ -1,13 +1,12 @@
 use std::{collections::BTreeMap, fmt, pin::Pin};
 
-use aws_config::SdkConfig;
 use aws_sdk_cloudwatch::Client;
 use futures_util::{future, FutureExt, Stream};
 
 use crate::{
     collector::{self, CloudWatch, Config, Resolution},
     error::Error,
-    BoxFuture,
+    BoxFuture, SdkConfig,
 };
 
 pub struct Builder {

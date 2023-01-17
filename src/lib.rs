@@ -4,6 +4,7 @@
 #![allow(clippy::mutable_key_type)]
 
 pub use {
+    aws_config::SdkConfig,
     builder::{builder, Builder},
     collector::Resolution,
     error::Error,
