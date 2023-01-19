@@ -1,7 +1,6 @@
-use std::{collections::BTreeMap, fmt, pin::Pin};
+use std::{borrow::Cow, collections::BTreeMap, fmt, pin::Pin};
 
-use aws_config::SdkConfig;
-use aws_sdk_cloudwatch::Client;
+use aws_sdk_cloudwatch::{Client, Region};
 use futures_util::{future, FutureExt, Stream};
 
 use crate::{
@@ -21,8 +20,8 @@ pub struct Builder {
     force_flush_stream: Option<Pin<Box<dyn Stream<Item = ()> + Send>>>,
 }
 
-pub fn builder(config: &SdkConfig) -> Builder {
-    Builder::new(config)
+pub async fn builder(region: impl Into<Cow<'static, str>>) -> Builder {
+    Builder::new(region).await
 }
 
 fn extract_namespace(cloudwatch_namespace: Option<String>) -> Result<String, Error> {
@@ -35,8 +34,10 @@ fn extract_namespace(cloudwatch_namespace: Option<String>) -> Result<String, Err
 }
 
 impl Builder {
-    pub fn new(config: &SdkConfig) -> Self {
-        let client = Client::new(config);
+    pub async fn new(region: impl Into<Cow<'static, str>>) -> Self {
+        let region = Region::new(region);
+        let conf = aws_config::from_env().region(region).load().await;
+        let client = Client::new(&conf);
         Self::new_with(client)
     }
 
