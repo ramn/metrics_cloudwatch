@@ -18,7 +18,7 @@ async fn test_flush_on_shutdown() -> Result<(), Box<dyn Error>> {
     tokio::time::pause();
     let (tx, rx) = tokio::sync::oneshot::channel();
     let backend_fut = Box::pin(
-        metrics_cloudwatch::Builder::new_with(client.clone())
+        metrics_cloudwatch::Builder::new_with_client(client.clone())
             .cloudwatch_namespace("test-ns")
             .default_dimension("dimension", "default")
             .send_interval_secs(1)

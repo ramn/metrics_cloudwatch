@@ -20,10 +20,6 @@ pub struct Builder {
     force_flush_stream: Option<Pin<Box<dyn Stream<Item = ()> + Send>>>,
 }
 
-pub async fn builder(region: impl Into<Cow<'static, str>>) -> Builder {
-    Builder::new(region).await
-}
-
 fn extract_namespace(cloudwatch_namespace: Option<String>) -> Result<String, Error> {
     match cloudwatch_namespace {
         Some(namespace) if !namespace.is_empty() => Ok(namespace),
@@ -34,14 +30,20 @@ fn extract_namespace(cloudwatch_namespace: Option<String>) -> Result<String, Err
 }
 
 impl Builder {
-    pub async fn new(region: impl Into<Cow<'static, str>>) -> Self {
+    pub async fn new() -> Self {
+        let conf = aws_config::load_from_env().await;
+        let client = Client::new(&conf);
+        Self::new_with_client(client)
+    }
+    pub async fn new_with_region(region: impl Into<Cow<'static, str>>) -> Self {
         let region = Region::new(region);
         let conf = aws_config::from_env().region(region).load().await;
         let client = Client::new(&conf);
-        Self::new_with(client)
+        Self::new_with_client(client)
     }
 
-    pub fn new_with(client: impl CloudWatch + Send + Sync + 'static) -> Self {
+    #[doc(hidden)]
+    pub fn new_with_client(client: impl CloudWatch + Send + Sync + 'static) -> Self {
         Builder {
             cloudwatch_namespace: Default::default(),
             default_dimensions: Default::default(),
