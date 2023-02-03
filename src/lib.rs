@@ -3,12 +3,7 @@
 // False positives on `metrics::Key` which uses interior mutability to cache the hash
 #![allow(clippy::mutable_key_type)]
 
-pub use {
-    builder::{builder, Builder},
-    collector::Resolution,
-    error::Error,
-    metrics,
-};
+pub use {builder::Builder, collector::Resolution, error::Error, metrics};
 
 use std::{borrow::Cow, future::Future, pin::Pin};
 
