@@ -5,12 +5,15 @@
 
 pub use {builder::Builder, collector::Resolution, error::Error, metrics};
 
+#[cfg(feature = "gzip")]
+use flate2::Compression;
 use std::{borrow::Cow, future::Future, pin::Pin};
 
 mod builder;
 #[doc(hidden)]
 pub mod collector;
 mod error;
+pub mod mock;
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -89,5 +92,29 @@ impl From<Unit> for Cow<'static, str> {
 impl From<Unit> for metrics::SharedString {
     fn from(unit: Unit) -> Self {
         unit.as_str().into()
+    }
+}
+
+#[derive(Clone, Eq, PartialEq, Debug)]
+pub enum GzipSetting {
+    Off,
+    #[cfg(feature = "gzip")]
+    On {
+        compression: Compression,
+    },
+}
+
+impl Default for GzipSetting {
+    fn default() -> Self {
+        GzipSetting::Off
+    }
+}
+
+impl GzipSetting {
+    #[cfg(feature = "gzip")]
+    pub fn standard_settings() -> Self {
+        Self::On {
+            compression: Compression::default(),
+        }
     }
 }

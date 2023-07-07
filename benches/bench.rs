@@ -4,10 +4,9 @@ use {
     metrics::Recorder,
 };
 
-use metrics_cloudwatch::collector;
-
-#[path = "../tests/common/mod.rs"]
-mod common;
+use metrics_cloudwatch::{
+    collector, collector::ClientConfig, mock::MockCloudWatchClient, GzipSetting,
+};
 
 fn simple(c: &mut Criterion) {
     const NUM_ENTRIES: usize = 2 * 1024;
@@ -20,19 +19,27 @@ fn simple(c: &mut Criterion) {
     group
         .bench_function("full", |b| {
             b.to_async(&runtime).iter(|| async {
-                let cloudwatch_client = common::MockCloudWatchClient::default();
+                let cloudwatch_client = MockCloudWatchClient::default();
 
                 let (shutdown_sender, receiver) = tokio::sync::oneshot::channel();
-                let (recorder, task) = collector::new(collector::Config {
-                    cloudwatch_namespace: "".into(),
-                    default_dimensions: Default::default(),
-                    storage_resolution: collector::Resolution::Second,
-                    send_interval_secs: 200,
-                    client: Box::new(cloudwatch_client.clone()),
-                    shutdown_signal: receiver.map(|_| ()).boxed().shared(),
-                    metric_buffer_size: 1024,
-                    force_flush_stream: Some(Box::pin(futures_util::stream::empty())),
-                });
+
+                let (recorder, task) = collector::new(
+                    collector::Config {
+                        cloudwatch_namespace: "".into(),
+                        default_dimensions: Default::default(),
+                        storage_resolution: collector::Resolution::Second,
+                        send_interval_secs: 200,
+                        region: None,
+                        shutdown_signal: receiver.map(|_| ()).boxed().shared(),
+                        metric_buffer_size: 1024,
+                        force_flush_stream: Some(Box::pin(futures_util::stream::empty())),
+                    },
+                    ClientConfig {
+                        mock: Some(cloudwatch_client.clone()),
+                        gzip: GzipSetting::Off,
+                    },
+                )
+                .await;
 
                 let task = tokio::spawn(task);
 
