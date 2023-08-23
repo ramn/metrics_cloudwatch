@@ -2,8 +2,12 @@
 use std::{future::Future, pin::Pin, sync::Arc, sync::Mutex};
 
 use aws_sdk_cloudwatch::{
-    error::PutMetricDataError, input::PutMetricDataInput, model::MetricDatum, types::SdkError,
+    operation::put_metric_data::{PutMetricDataError, PutMetricDataInput},
+    types::MetricDatum,
 };
+use aws_smithy_http::body::SdkBody;
+use aws_smithy_http::result::SdkError;
+
 use futures_util::FutureExt;
 use metrics_cloudwatch::collector::CloudWatch;
 
@@ -17,7 +21,10 @@ impl CloudWatch for MockCloudWatchClient {
         &self,
         namespace: String,
         data: Vec<MetricDatum>,
-    ) -> metrics_cloudwatch::BoxFuture<'_, Result<(), SdkError<PutMetricDataError>>> {
+    ) -> metrics_cloudwatch::BoxFuture<
+        '_,
+        Result<(), SdkError<PutMetricDataError, http::Response<SdkBody>>>,
+    > {
         let data = PutMetricDataInput::builder()
             .namespace(namespace)
             .set_metric_data(Some(data))

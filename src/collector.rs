@@ -11,11 +11,13 @@ use std::{
 
 use {
     aws_sdk_cloudwatch::{
-        error::PutMetricDataError,
-        model::{Dimension, MetricDatum, StandardUnit, StatisticSet},
-        types::{DateTime, SdkError},
+        error::SdkError,
+        operation::put_metric_data::PutMetricDataError,
+        primitives::DateTime,
+        types::{Dimension, MetricDatum, StandardUnit, StatisticSet},
         Client,
     },
+    aws_smithy_http::body::SdkBody,
     futures_util::{
         future,
         stream::{self, Stream},
@@ -32,7 +34,7 @@ pub trait CloudWatch {
         &self,
         namespace: String,
         data: Vec<MetricDatum>,
-    ) -> BoxFuture<'_, Result<(), SdkError<PutMetricDataError>>>;
+    ) -> BoxFuture<'_, Result<(), SdkError<PutMetricDataError, http::Response<SdkBody>>>>;
 }
 
 impl CloudWatch for Client {
@@ -40,7 +42,7 @@ impl CloudWatch for Client {
         &self,
         namespace: String,
         data: Vec<MetricDatum>,
-    ) -> BoxFuture<'_, Result<(), SdkError<PutMetricDataError>>> {
+    ) -> BoxFuture<'_, Result<(), SdkError<PutMetricDataError, http::Response<SdkBody>>>> {
         let put = self.put_metric_data();
         async move {
             put.namespace(namespace)
