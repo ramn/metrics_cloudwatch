@@ -2,7 +2,9 @@
 use std::{future::Future, pin::Pin, sync::Arc, sync::Mutex};
 
 use aws_sdk_cloudwatch::{
-    error::PutMetricDataError, input::PutMetricDataInput, model::MetricDatum, types::SdkError,
+    error::SdkError,
+    operation::put_metric_data::{PutMetricDataError, PutMetricDataInput},
+    types::MetricDatum,
 };
 use futures_util::FutureExt;
 use metrics_cloudwatch::collector::CloudWatch;

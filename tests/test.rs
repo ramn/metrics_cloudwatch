@@ -1,6 +1,6 @@
 use std::{error::Error, time::Duration};
 
-use aws_sdk_cloudwatch::model::{Dimension, StandardUnit, StatisticSet};
+use aws_sdk_cloudwatch::types::{Dimension, StandardUnit, StatisticSet};
 use futures_util::FutureExt;
 
 use common::MockCloudWatchClient;

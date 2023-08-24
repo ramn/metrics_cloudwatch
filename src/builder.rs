@@ -1,6 +1,6 @@
 use std::{borrow::Cow, collections::BTreeMap, fmt, pin::Pin};
 
-use aws_sdk_cloudwatch::{Client, Region};
+use aws_sdk_cloudwatch::{config::Region, Client};
 use futures_util::{future, FutureExt, Stream};
 
 use crate::{
