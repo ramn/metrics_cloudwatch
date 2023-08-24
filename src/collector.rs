@@ -11,9 +11,10 @@ use std::{
 
 use {
     aws_sdk_cloudwatch::{
-        error::PutMetricDataError,
-        model::{Dimension, MetricDatum, StandardUnit, StatisticSet},
-        types::{DateTime, SdkError},
+        error::SdkError,
+        operation::put_metric_data::PutMetricDataError,
+        primitives::DateTime,
+        types::{Dimension, MetricDatum, StandardUnit, StatisticSet},
         Client,
     },
     futures_util::{
