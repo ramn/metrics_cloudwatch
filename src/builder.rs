@@ -3,7 +3,7 @@ use std::{borrow::Cow, collections::BTreeMap, fmt, pin::Pin};
 use aws_sdk_cloudwatch::config::Region;
 use futures_util::{future, FutureExt, Stream};
 
-use crate::mock::MockCloudWatchClient;
+use crate::collector::CloudWatch;
 use crate::{
     collector::{self, Config, Resolution},
     error::Error,
@@ -20,7 +20,6 @@ pub struct Builder {
     force_flush_stream: Option<Pin<Box<dyn Stream<Item = ()> + Send>>>,
     region: Option<Region>,
     gzip: GzipSetting,
-    mock: Option<MockCloudWatchClient>,
 }
 
 fn extract_namespace(cloudwatch_namespace: Option<String>) -> Result<String, Error> {
@@ -44,15 +43,6 @@ impl Builder {
             force_flush_stream: Default::default(),
             region: None,
             gzip: GzipSetting::Off,
-            mock: None,
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn new_mock(mock: MockCloudWatchClient) -> Self {
-        Builder {
-            mock: Some(mock),
-            ..Builder::new()
         }
     }
 
@@ -159,6 +149,16 @@ impl Builder {
         collector::init_future(set_boxed_recorder, config).await
     }
 
+    #[doc(hidden)]
+    pub async fn init_future_mock(
+        self,
+        mock: impl CloudWatch,
+        set_boxed_recorder: fn(Box<dyn metrics::Recorder>) -> Result<(), metrics::SetRecorderError>,
+    ) -> Result<(), Error> {
+        let config = self.build_config()?;
+        collector::init_future_mock(set_boxed_recorder, mock, config).await
+    }
+
     fn build_config(self) -> Result<Config, Error> {
         let config = Config {
             cloudwatch_namespace: extract_namespace(self.cloudwatch_namespace)?,
@@ -172,7 +172,6 @@ impl Builder {
                 .shared(),
             metric_buffer_size: self.metric_buffer_size,
             force_flush_stream: self.force_flush_stream,
-            mock: self.mock,
             gzip: self.gzip,
         };
 
@@ -192,7 +191,6 @@ impl fmt::Debug for Builder {
             force_flush_stream: _,
             region,
             gzip,
-            mock: _,
         } = self;
         f.debug_struct("Builder")
             .field("cloudwatch_namespace", cloudwatch_namespace)

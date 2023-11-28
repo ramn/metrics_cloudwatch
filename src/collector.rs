@@ -34,11 +34,10 @@ use {
     tokio::sync::mpsc,
 };
 
-use crate::mock::MockCloudWatchClient;
 use crate::GzipSetting;
 use crate::{error::Error, BoxFuture};
 
-pub(crate) trait CloudWatch {
+pub trait CloudWatch {
     fn put_metric_data(
         &self,
         namespace: String,
@@ -119,7 +118,6 @@ pub struct Config {
     pub shutdown_signal: future::Shared<BoxFuture<'static, ()>>,
     pub metric_buffer_size: usize,
     pub force_flush_stream: Option<Pin<Box<dyn Stream<Item = ()> + Send>>>,
-    pub mock: Option<MockCloudWatchClient>,
     pub gzip: GzipSetting,
 }
 
@@ -206,6 +204,15 @@ pub struct RecorderHandle {
     sender: mpsc::Sender<Datum>,
 }
 
+async fn create_real_client(region: Option<Region>) -> Client {
+    let mut aws_conf = aws_config::defaults(BehaviorVersion::latest());
+    if let Some(region) = region {
+        aws_conf = aws_conf.region(region.clone())
+    };
+    let aws_conf = aws_conf.load().await;
+    Client::new(&aws_conf)
+}
+
 pub(crate) fn init(
     set_boxed_recorder: fn(Box<dyn Recorder>) -> Result<(), metrics::SetRecorderError>,
     config: Config,
@@ -224,17 +231,33 @@ pub(crate) fn init(
     });
 }
 
-pub(crate) async fn init_future(
+pub(crate) async fn init_future_mock(
     set_boxed_recorder: fn(Box<dyn Recorder>) -> Result<(), metrics::SetRecorderError>,
+    client: impl CloudWatch,
     config: Config,
 ) -> Result<(), Error> {
-    let (recorder, task) = new(config).await;
+    let (recorder, task) = new(client, config).await;
     set_boxed_recorder(Box::new(recorder)).map_err(Error::SetRecorder)?;
     task.await;
     Ok(())
 }
 
-pub async fn new(mut config: Config) -> (RecorderHandle, impl Future<Output = ()>) {
+pub(crate) async fn init_future(
+    set_boxed_recorder: fn(Box<dyn Recorder>) -> Result<(), metrics::SetRecorderError>,
+    config: Config,
+) -> Result<(), Error> {
+    let client = create_real_client(config.region.clone()).await;
+    let client = CloudwatchClient::new(client, config.gzip.clone());
+    let (recorder, task) = new(client, config).await;
+    set_boxed_recorder(Box::new(recorder)).map_err(Error::SetRecorder)?;
+    task.await;
+    Ok(())
+}
+
+pub async fn new(
+    cloudwatch_client: impl CloudWatch,
+    mut config: Config,
+) -> (RecorderHandle, impl Future<Output = ()>) {
     let (collect_sender, mut collect_receiver) = mpsc::channel(1024);
     let (emit_sender, emit_receiver) = mpsc::channel(config.metric_buffer_size);
 
@@ -280,19 +303,6 @@ pub async fn new(mut config: Config) -> (RecorderHandle, impl Future<Output = ()
             .await;
     };
 
-    let cloudwatch_client: Box<dyn CloudWatch + Send + Sync> = match config.mock {
-        Some(mock) => Box::new(mock),
-        None => {
-            let mut aws_conf = aws_config::defaults(BehaviorVersion::latest());
-            if let Some(region) = &config.region {
-                aws_conf = aws_conf.region(region.clone())
-            };
-            let aws_conf = aws_conf.load().await;
-            let client = Client::new(&aws_conf);
-            Box::new(CloudwatchClient::new(client, config.gzip.clone()))
-        }
-    };
-
     let emitter = mk_emitter(
         emit_receiver,
         cloudwatch_client,
@@ -328,7 +338,7 @@ where
 
 async fn mk_emitter(
     mut emit_receiver: mpsc::Receiver<Vec<MetricDatum>>,
-    cloudwatch_client: Box<dyn CloudWatch + Send + Sync>,
+    cloudwatch_client: impl CloudWatch,
     cloudwatch_namespace: String,
 ) {
     let cloudwatch_client = &cloudwatch_client;

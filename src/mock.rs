@@ -55,13 +55,13 @@ mod tests {
         tokio::time::pause();
         let (tx, rx) = tokio::sync::oneshot::channel();
         let backend_fut = Box::pin(
-            Builder::new_mock(client.clone())
+            Builder::new()
                 .cloudwatch_namespace("test-ns")
                 .default_dimension("dimension", "default")
                 .send_interval_secs(1)
                 .storage_resolution(Resolution::Second)
                 .shutdown_signal(Box::pin(rx.map(|_| ())))
-                .init_future(metrics::set_boxed_recorder),
+                .init_future_mock(client.clone(), metrics::set_boxed_recorder),
         );
         let joinhandle = tokio::spawn(backend_fut);
         tokio::time::advance(Duration::from_millis(5)).await;
