@@ -4,7 +4,6 @@ use {
     metrics::Recorder,
 };
 
-use crate::common::MockCloudWatchClient;
 use metrics_cloudwatch::{collector, GzipSetting};
 
 #[path = "../tests/common/mod.rs"]
@@ -21,7 +20,7 @@ fn simple(c: &mut Criterion) {
     group
         .bench_function("full", |b| {
             b.to_async(&runtime).iter(|| async {
-                let cloudwatch_client = MockCloudWatchClient::default();
+                let cloudwatch_client = common::MockCloudWatchClient::default();
 
                 let (shutdown_sender, receiver) = tokio::sync::oneshot::channel();
 

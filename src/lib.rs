@@ -2,11 +2,12 @@
 #![forbid(unsafe_code)]
 // False positives on `metrics::Key` which uses interior mutability to cache the hash
 #![allow(clippy::mutable_key_type)]
+#![cfg_attr(all(doc, CHANNEL_NIGHTLY), feature(doc_auto_cfg))]
 
 pub use {builder::Builder, collector::Resolution, error::Error, metrics};
 
 #[cfg(feature = "gzip")]
-use flate2::Compression;
+pub use flate2::Compression;
 use std::{borrow::Cow, future::Future, pin::Pin};
 
 mod builder;
