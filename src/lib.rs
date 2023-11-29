@@ -13,7 +13,6 @@ mod builder;
 #[doc(hidden)]
 pub mod collector;
 mod error;
-pub mod mock;
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 

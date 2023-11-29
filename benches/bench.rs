@@ -4,7 +4,11 @@ use {
     metrics::Recorder,
 };
 
-use metrics_cloudwatch::{collector, mock::MockCloudWatchClient, GzipSetting};
+use crate::common::MockCloudWatchClient;
+use metrics_cloudwatch::{collector, GzipSetting};
+
+#[path = "../tests/common/mod.rs"]
+mod common;
 
 fn simple(c: &mut Criterion) {
     const NUM_ENTRIES: usize = 2 * 1024;
