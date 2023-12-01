@@ -4,7 +4,7 @@ use {
     metrics::Recorder,
 };
 
-use metrics_cloudwatch::collector;
+use metrics_cloudwatch::{collector, GzipSetting};
 
 #[path = "../tests/common/mod.rs"]
 mod common;
@@ -23,16 +23,22 @@ fn simple(c: &mut Criterion) {
                 let cloudwatch_client = common::MockCloudWatchClient::default();
 
                 let (shutdown_sender, receiver) = tokio::sync::oneshot::channel();
-                let (recorder, task) = collector::new(collector::Config {
-                    cloudwatch_namespace: "".into(),
-                    default_dimensions: Default::default(),
-                    storage_resolution: collector::Resolution::Second,
-                    send_interval_secs: 200,
-                    client: Box::new(cloudwatch_client.clone()),
-                    shutdown_signal: receiver.map(|_| ()).boxed().shared(),
-                    metric_buffer_size: 1024,
-                    force_flush_stream: Some(Box::pin(futures_util::stream::empty())),
-                });
+
+                let (recorder, task) = collector::new(
+                    cloudwatch_client.clone(),
+                    collector::Config {
+                        cloudwatch_namespace: "".into(),
+                        default_dimensions: Default::default(),
+                        storage_resolution: collector::Resolution::Second,
+                        send_interval_secs: 200,
+                        region: None,
+                        shutdown_signal: receiver.map(|_| ()).boxed().shared(),
+                        metric_buffer_size: 1024,
+                        force_flush_stream: Some(Box::pin(futures_util::stream::empty())),
+                        gzip: GzipSetting::Off,
+                    },
+                )
+                .await;
 
                 let task = tokio::spawn(task);
 

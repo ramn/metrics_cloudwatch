@@ -1,3 +1,11 @@
+use aws_sdk_cloudwatch::config::Region;
+
+#[cfg(feature = "gzip")]
+pub use flate2::Compression;
+
+use aws_config::BehaviorVersion;
+#[cfg(feature = "gzip")]
+use std::io::Write;
 use std::{
     collections::BTreeMap,
     fmt,
@@ -26,6 +34,7 @@ use {
     tokio::sync::mpsc,
 };
 
+use crate::GzipSetting;
 use crate::{error::Error, BoxFuture};
 
 pub trait CloudWatch {
@@ -36,19 +45,54 @@ pub trait CloudWatch {
     ) -> BoxFuture<'_, Result<(), SdkError<PutMetricDataError>>>;
 }
 
-impl CloudWatch for Client {
+pub(crate) struct CloudwatchClient {
+    client: Client,
+    gzip_setting: GzipSetting,
+}
+
+impl CloudwatchClient {
+    pub(crate) fn new(client: Client, gzip_setting: GzipSetting) -> Self {
+        Self {
+            client,
+            gzip_setting,
+        }
+    }
+}
+
+impl CloudWatch for CloudwatchClient {
     fn put_metric_data(
         &self,
         namespace: String,
         data: Vec<MetricDatum>,
     ) -> BoxFuture<'_, Result<(), SdkError<PutMetricDataError>>> {
-        let put = self.put_metric_data();
+        let put = self.client.put_metric_data();
         async move {
-            put.namespace(namespace)
-                .set_metric_data(Some(data))
-                .send()
-                .await
-                .map(|_| ())
+            let operation = put.namespace(namespace).set_metric_data(Some(data));
+            match self.gzip_setting {
+                GzipSetting::Off => operation.send().await.map(|_| ()),
+                #[cfg(feature = "gzip")]
+                GzipSetting::On { compression } => {
+                    let operation = operation.customize().map_request(move |mut request| {
+                        let body = request.body_mut();
+
+                        if let Some(bytes) = body.bytes() {
+                            let mut encoder =
+                                flate2::write::GzEncoder::new(Vec::new(), compression);
+                            encoder.write_all(bytes)?;
+
+                            let r = encoder.finish()?;
+                            let r_len = r.len() as u64;
+                            *body = r.into();
+                            request.headers_mut().insert("content-encoding", "gzip");
+                            request
+                                .headers_mut()
+                                .insert("content-length", r_len.to_string());
+                        }
+                        Ok::<_, std::io::Error>(request)
+                    });
+                    operation.send().await.map(|_| ())
+                }
+            }
         }
         .boxed()
     }
@@ -70,10 +114,11 @@ pub struct Config {
     pub default_dimensions: BTreeMap<String, String>,
     pub storage_resolution: Resolution,
     pub send_interval_secs: u64,
-    pub client: Box<dyn CloudWatch + Send + Sync>,
+    pub region: Option<Region>,
     pub shutdown_signal: future::Shared<BoxFuture<'static, ()>>,
     pub metric_buffer_size: usize,
     pub force_flush_stream: Option<Pin<Box<dyn Stream<Item = ()> + Send>>>,
+    pub gzip: GzipSetting,
 }
 
 struct CollectorConfig {
@@ -159,6 +204,15 @@ pub struct RecorderHandle {
     sender: mpsc::Sender<Datum>,
 }
 
+async fn create_real_client(region: Option<Region>) -> Client {
+    let mut aws_conf = aws_config::defaults(BehaviorVersion::latest());
+    if let Some(region) = region {
+        aws_conf = aws_conf.region(region.clone())
+    };
+    let aws_conf = aws_conf.load().await;
+    Client::new(&aws_conf)
+}
+
 pub(crate) fn init(
     set_boxed_recorder: fn(Box<dyn Recorder>) -> Result<(), metrics::SetRecorderError>,
     config: Config,
@@ -177,17 +231,33 @@ pub(crate) fn init(
     });
 }
 
-pub(crate) async fn init_future(
+pub(crate) async fn init_future_mock(
     set_boxed_recorder: fn(Box<dyn Recorder>) -> Result<(), metrics::SetRecorderError>,
+    client: impl CloudWatch,
     config: Config,
 ) -> Result<(), Error> {
-    let (recorder, task) = new(config);
+    let (recorder, task) = new(client, config).await;
     set_boxed_recorder(Box::new(recorder)).map_err(Error::SetRecorder)?;
     task.await;
     Ok(())
 }
 
-pub fn new(mut config: Config) -> (RecorderHandle, impl Future<Output = ()>) {
+pub(crate) async fn init_future(
+    set_boxed_recorder: fn(Box<dyn Recorder>) -> Result<(), metrics::SetRecorderError>,
+    config: Config,
+) -> Result<(), Error> {
+    let client = create_real_client(config.region.clone()).await;
+    let client = CloudwatchClient::new(client, config.gzip.clone());
+    let (recorder, task) = new(client, config).await;
+    set_boxed_recorder(Box::new(recorder)).map_err(Error::SetRecorder)?;
+    task.await;
+    Ok(())
+}
+
+pub async fn new(
+    cloudwatch_client: impl CloudWatch,
+    mut config: Config,
+) -> (RecorderHandle, impl Future<Output = ()>) {
     let (collect_sender, mut collect_receiver) = mpsc::channel(1024);
     let (emit_sender, emit_receiver) = mpsc::channel(config.metric_buffer_size);
 
@@ -216,8 +286,6 @@ pub fn new(mut config: Config) -> (RecorderHandle, impl Future<Output = ()>) {
         .take_until(config.shutdown_signal.clone().map(|_| true)),
     );
 
-    let emitter = mk_emitter(emit_receiver, config.client, config.cloudwatch_namespace);
-
     let internal_config = CollectorConfig {
         default_dimensions: config.default_dimensions,
         storage_resolution: config.storage_resolution,
@@ -234,6 +302,12 @@ pub fn new(mut config: Config) -> (RecorderHandle, impl Future<Output = ()>) {
             })
             .await;
     };
+
+    let emitter = mk_emitter(
+        emit_receiver,
+        cloudwatch_client,
+        config.cloudwatch_namespace,
+    );
     (
         RecorderHandle {
             sender: collect_sender,
@@ -264,7 +338,7 @@ where
 
 async fn mk_emitter(
     mut emit_receiver: mpsc::Receiver<Vec<MetricDatum>>,
-    cloudwatch_client: Box<dyn CloudWatch + Send + Sync>,
+    cloudwatch_client: impl CloudWatch,
     cloudwatch_namespace: String,
 ) {
     let cloudwatch_client = &cloudwatch_client;
@@ -337,15 +411,9 @@ fn metrics_chunks(mut metrics: &[MetricDatum]) -> impl Iterator<Item = &[MetricD
 }
 
 fn metric_size(metric: &MetricDatum) -> usize {
-    fn count_option_vec<T>(vs: &Option<&[T]>) -> usize {
-        vs.as_ref().map(|vs| vs.len()).unwrap_or(0)
-    }
-
     60 * (
         // The 6 non Vec fields
-        6 + count_option_vec(&metric.values())
-            + count_option_vec(&metric.counts())
-            + count_option_vec(&metric.dimensions())
+        6 + metric.values().len() + metric.counts().len() + metric.dimensions().len()
     )
 }
 

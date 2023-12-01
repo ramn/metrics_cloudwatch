@@ -1,6 +1,6 @@
 [package]
 name = "metrics_cloudwatch"
-version = "2.0.1"
+version = "3.0.0"
 authors = ["ramn <github@rymdimperiet.org>"]
 edition = "2018"
 
@@ -26,11 +26,12 @@ rand = { version = "0.8", default-features = false, features = [
     "std",
     "std_rng",
 ] }
-aws-sdk-cloudwatch = "0.30"
-aws-config = "0.56.1"
-aws-smithy-types-convert = { version = "0.56.1", features = ["convert-chrono"] }
+aws-sdk-cloudwatch = "1"
+aws-config = "1"
+aws-smithy-types-convert = { version = "0.60", features = ["convert-chrono"] }
 serde_json = "1"
 tokio = { version = "1", features = ["sync", "time"] }
+flate2 = { version="1.0.26", optional = true}
 
 [dev-dependencies]
 proptest = "1"
@@ -38,7 +39,13 @@ async-trait = "0.1.24"
 criterion = { version = "0.3", features = ["async_tokio"] }
 tokio = { version = "1", features = ["test-util", "macros"] }
 
+[build-dependencies]
+rustc_version = "0.4.0"
+
 
 [[bench]]
 name = "bench"
 harness = false
+
+[features]
+gzip = ["dep:flate2"]

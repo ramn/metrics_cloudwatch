@@ -2,9 +2,12 @@
 #![forbid(unsafe_code)]
 // False positives on `metrics::Key` which uses interior mutability to cache the hash
 #![allow(clippy::mutable_key_type)]
+#![cfg_attr(all(doc, CHANNEL_NIGHTLY), feature(doc_auto_cfg))]
 
 pub use {builder::Builder, collector::Resolution, error::Error, metrics};
 
+#[cfg(feature = "gzip")]
+pub use flate2::Compression;
 use std::{borrow::Cow, future::Future, pin::Pin};
 
 mod builder;
@@ -89,5 +92,29 @@ impl From<Unit> for Cow<'static, str> {
 impl From<Unit> for metrics::SharedString {
     fn from(unit: Unit) -> Self {
         unit.as_str().into()
+    }
+}
+
+#[derive(Clone, Eq, PartialEq, Debug)]
+pub enum GzipSetting {
+    Off,
+    #[cfg(feature = "gzip")]
+    On {
+        compression: Compression,
+    },
+}
+
+impl Default for GzipSetting {
+    fn default() -> Self {
+        GzipSetting::Off
+    }
+}
+
+impl GzipSetting {
+    #[cfg(feature = "gzip")]
+    pub fn standard_settings() -> Self {
+        Self::On {
+            compression: Compression::default(),
+        }
     }
 }
