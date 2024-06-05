@@ -337,15 +337,9 @@ fn metrics_chunks(mut metrics: &[MetricDatum]) -> impl Iterator<Item = &[MetricD
 }
 
 fn metric_size(metric: &MetricDatum) -> usize {
-    fn count_option_vec<T>(vs: &Option<&[T]>) -> usize {
-        vs.as_ref().map(|vs| vs.len()).unwrap_or(0)
-    }
-
     60 * (
         // The 6 non Vec fields
-        6 + count_option_vec(&metric.values())
-            + count_option_vec(&metric.counts())
-            + count_option_vec(&metric.dimensions())
+        6 + metric.values().len() + metric.counts().len() + metric.dimensions().len()
     )
 }
 
