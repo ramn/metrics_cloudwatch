@@ -7,7 +7,6 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v1
-      - uses: icepuma/rust-action@master
-        with:
-          args: cargo fmt -- --check && ./clippy.sh && cargo test && cargo test --benches
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo fmt -- --check && ./clippy.sh && cargo test && cargo test --benches
