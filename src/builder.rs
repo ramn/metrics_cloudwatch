@@ -1,3 +1,4 @@
+use aws_config::BehaviorVersion;
 use std::{borrow::Cow, collections::BTreeMap, fmt, pin::Pin};
 
 use aws_sdk_cloudwatch::{config::Region, Client};
@@ -31,13 +32,16 @@ fn extract_namespace(cloudwatch_namespace: Option<String>) -> Result<String, Err
 
 impl Builder {
     pub async fn new() -> Self {
-        let conf = aws_config::load_from_env().await;
+        let conf = aws_config::defaults(BehaviorVersion::latest()).load().await;
         let client = Client::new(&conf);
         Self::new_with_client(client)
     }
     pub async fn new_with_region(region: impl Into<Cow<'static, str>>) -> Self {
         let region = Region::new(region);
-        let conf = aws_config::from_env().region(region).load().await;
+        let conf = aws_config::defaults(BehaviorVersion::latest())
+            .region(region)
+            .load()
+            .await;
         let client = Client::new(&conf);
         Self::new_with_client(client)
     }
