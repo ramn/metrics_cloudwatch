@@ -20,7 +20,7 @@ aws-config = "1"
 aws-sdk-cloudwatch = "1"
 aws-smithy-types-convert = { version = "0.60", features = ["convert-chrono"] }
 chrono = "0.4"
-futures-util = { version = "0.3", default-features = false }
+futures-util = "0.3"
 log = "0.4"
 metrics = { version = "0.16", features = ["std"] }
 ordered-float = "2"
