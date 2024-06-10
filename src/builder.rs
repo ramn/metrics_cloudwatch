@@ -2,9 +2,8 @@ use std::{collections::BTreeMap, fmt, pin::Pin};
 
 use futures_util::{future, FutureExt, Stream};
 
-use crate::collector::CloudWatch;
 use crate::{
-    collector::{self, Config, Resolution},
+    collector::{self, CloudWatch, Config, RecorderHandle, Resolution},
     error::Error,
     BoxFuture,
 };
@@ -107,36 +106,42 @@ impl Builder {
 
     /// Initializes the CloudWatch metrics backend and runs it in a new thread.
     ///
-    /// Expects the `metrics::set_boxed_recorder` function as an argument as a safeguard against
+    /// Expects the [metrics::set_global_recorder] function as an argument as a safeguard against
     /// accidentally using a different `metrics` version than is used in this crate.
     pub fn init_thread(
         self,
         client: aws_sdk_cloudwatch::Client,
-        set_boxed_recorder: fn(Box<dyn metrics::Recorder>) -> Result<(), metrics::SetRecorderError>,
+        set_global_recorder: fn(
+            RecorderHandle,
+        ) -> Result<(), metrics::SetRecorderError<RecorderHandle>>,
     ) -> Result<(), Error> {
-        collector::init(set_boxed_recorder, client, self.build_config()?);
+        collector::init(set_global_recorder, client, self.build_config()?);
         Ok(())
     }
 
     /// Initializes the CloudWatch metrics and returns a Future that must be polled
     ///
-    /// Expects the `metrics::set_boxed_recorder` function as an argument as a safeguard against
+    /// Expects the [metrics::set_global_recorder] function as an argument as a safeguard against
     /// accidentally using a different `metrics` version than is used in this crate.
     pub async fn init_future(
         self,
         client: aws_sdk_cloudwatch::Client,
-        set_boxed_recorder: fn(Box<dyn metrics::Recorder>) -> Result<(), metrics::SetRecorderError>,
+        set_global_recorder: fn(
+            RecorderHandle,
+        ) -> Result<(), metrics::SetRecorderError<RecorderHandle>>,
     ) -> Result<(), Error> {
-        collector::init_future(set_boxed_recorder, client, self.build_config()?).await
+        collector::init_future(set_global_recorder, client, self.build_config()?).await
     }
 
     #[doc(hidden)]
     pub async fn init_future_mock(
         self,
         client: impl CloudWatch,
-        set_boxed_recorder: fn(Box<dyn metrics::Recorder>) -> Result<(), metrics::SetRecorderError>,
+        set_global_recorder: fn(
+            RecorderHandle,
+        ) -> Result<(), metrics::SetRecorderError<RecorderHandle>>,
     ) -> Result<(), Error> {
-        collector::init_future(set_boxed_recorder, client, self.build_config()?).await
+        collector::init_future(set_global_recorder, client, self.build_config()?).await
     }
 
     fn build_config(self) -> Result<Config, Error> {

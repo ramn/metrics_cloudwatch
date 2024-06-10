@@ -1,7 +1,7 @@
 use {
     criterion::{criterion_group, Criterion, Throughput},
     futures_util::FutureExt,
-    metrics::Recorder,
+    metrics::Key,
 };
 
 use metrics_cloudwatch::collector;
@@ -40,15 +40,22 @@ fn simple(c: &mut Criterion) {
 
                 for i in 0..NUM_ENTRIES {
                     match i % 3 {
-                        0 => recorder.increment_counter(&metrics::Key::from("counter"), 1),
-                        1 => recorder.update_gauge(
-                            &metrics::Key::from("gauge"),
-                            metrics::GaugeValue::Absolute((i as i64 % 100) as f64),
-                        ),
-                        2 => recorder.record_histogram(
-                            &metrics::Key::from("histogram"),
-                            (i as u64 % 10) as f64,
-                        ),
+                        0 => {
+                            let key = Key::from("counter");
+                            recorder.register_counter(&key).increment(1);
+                        }
+                        1 => {
+                            let key = Key::from("gauge");
+
+                            recorder.register_gauge(&key).set((i as i64 % 100) as f64);
+                        }
+                        2 => {
+                            let key = Key::from("histogram");
+
+                            recorder
+                                .register_histogram(&key)
+                                .record((i as u64 % 10) as f64);
+                        }
                         _ => unreachable!(),
                     }
                     if i % 100 == 0 {

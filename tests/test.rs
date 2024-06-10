@@ -24,22 +24,23 @@ async fn test_flush_on_shutdown() -> Result<(), Box<dyn Error>> {
             .send_interval_secs(1)
             .storage_resolution(metrics_cloudwatch::Resolution::Second)
             .shutdown_signal(Box::pin(rx.map(|_| ())))
-            .init_future_mock(client.clone(), metrics::set_boxed_recorder),
+            .init_future_mock(client.clone(), metrics::set_global_recorder),
     );
     let joinhandle = tokio::spawn(backend_fut);
     tokio::time::advance(Duration::from_millis(5)).await;
 
     for i in 0..150 {
-        metrics::histogram!("test", i as f64);
-        metrics::counter!("count", 1);
+        metrics::histogram!("test").record(i);
+        metrics::counter!("count").increment(1);
     }
-    metrics::histogram!("test", 0.0);
-    metrics::histogram!("test", 200.0);
-    metrics::histogram!("labels", 111.0, "label" => "1", "@unknown_@_label_is_skipped" => "abc");
-    metrics::histogram!("labels2", 111.0, "dimension" => "", "label" => "1");
-    metrics::histogram!("bytes", 200.0, "@unit" => metrics_cloudwatch::Unit::Bytes);
-    metrics::gauge!("gauge", 100.0);
-    metrics::gauge!("gauge", 200.0);
+    metrics::histogram!("test").record(0.0);
+    metrics::histogram!("test").record(200.0);
+    metrics::histogram!("labels", "label" => "1", "@unknown_@_label_is_skipped" => "abc")
+        .record(111.0);
+    metrics::histogram!("labels2", "dimension" => "", "label" => "1").record(111.0);
+    metrics::histogram!("bytes", "@unit" => metrics_cloudwatch::Unit::Bytes).record(200.0);
+    metrics::gauge!("gauge").set(100.0);
+    metrics::gauge!("gauge").set(200.0);
 
     tokio::time::advance(Duration::from_millis(5)).await;
 
