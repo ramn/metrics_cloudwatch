@@ -1,11 +1,10 @@
-use aws_config::BehaviorVersion;
-use std::{borrow::Cow, collections::BTreeMap, fmt, pin::Pin};
+use std::{collections::BTreeMap, fmt, pin::Pin};
 
-use aws_sdk_cloudwatch::{config::Region, Client};
 use futures_util::{future, FutureExt, Stream};
 
+use crate::collector::CloudWatch;
 use crate::{
-    collector::{self, CloudWatch, Config, Resolution},
+    collector::{self, Config, Resolution},
     error::Error,
     BoxFuture,
 };
@@ -15,7 +14,6 @@ pub struct Builder {
     default_dimensions: BTreeMap<String, String>,
     storage_resolution: Option<Resolution>,
     send_interval_secs: Option<u64>,
-    client: Box<dyn CloudWatch + Send + Sync>,
     shutdown_signal: Option<BoxFuture<'static, ()>>,
     metric_buffer_size: usize,
     force_flush_stream: Option<Pin<Box<dyn Stream<Item = ()> + Send>>>,
@@ -31,29 +29,12 @@ fn extract_namespace(cloudwatch_namespace: Option<String>) -> Result<String, Err
 }
 
 impl Builder {
-    pub async fn new() -> Self {
-        let conf = aws_config::defaults(BehaviorVersion::latest()).load().await;
-        let client = Client::new(&conf);
-        Self::new_with_client(client)
-    }
-    pub async fn new_with_region(region: impl Into<Cow<'static, str>>) -> Self {
-        let region = Region::new(region);
-        let conf = aws_config::defaults(BehaviorVersion::latest())
-            .region(region)
-            .load()
-            .await;
-        let client = Client::new(&conf);
-        Self::new_with_client(client)
-    }
-
-    #[doc(hidden)]
-    pub fn new_with_client(client: impl CloudWatch + Send + Sync + 'static) -> Self {
+    pub fn new() -> Self {
         Builder {
             cloudwatch_namespace: Default::default(),
             default_dimensions: Default::default(),
             storage_resolution: Default::default(),
             send_interval_secs: Default::default(),
-            client: Box::new(client),
             shutdown_signal: Default::default(),
             metric_buffer_size: 2048,
             force_flush_stream: Default::default(),
@@ -102,11 +83,6 @@ impl Builder {
         }
     }
 
-    /// Sets the cloudwatch client to be used to send metrics.
-    pub fn client(self, client: Box<dyn CloudWatch + Send + Sync>) -> Self {
-        Self { client, ..self }
-    }
-
     /// Sets a future that acts as a shutdown signal when it completes.
     /// Completion of this future will trigger a final flush of metrics to CloudWatch.
     pub fn shutdown_signal(self, shutdown_signal: BoxFuture<'static, ()>) -> Self {
@@ -135,9 +111,10 @@ impl Builder {
     /// accidentally using a different `metrics` version than is used in this crate.
     pub fn init_thread(
         self,
+        client: aws_sdk_cloudwatch::Client,
         set_boxed_recorder: fn(Box<dyn metrics::Recorder>) -> Result<(), metrics::SetRecorderError>,
     ) -> Result<(), Error> {
-        collector::init(set_boxed_recorder, self.build_config()?);
+        collector::init(set_boxed_recorder, client, self.build_config()?);
         Ok(())
     }
 
@@ -147,9 +124,19 @@ impl Builder {
     /// accidentally using a different `metrics` version than is used in this crate.
     pub async fn init_future(
         self,
+        client: aws_sdk_cloudwatch::Client,
         set_boxed_recorder: fn(Box<dyn metrics::Recorder>) -> Result<(), metrics::SetRecorderError>,
     ) -> Result<(), Error> {
-        collector::init_future(set_boxed_recorder, self.build_config()?).await
+        collector::init_future(set_boxed_recorder, client, self.build_config()?).await
+    }
+
+    #[doc(hidden)]
+    pub async fn init_future_mock(
+        self,
+        client: impl CloudWatch,
+        set_boxed_recorder: fn(Box<dyn metrics::Recorder>) -> Result<(), metrics::SetRecorderError>,
+    ) -> Result<(), Error> {
+        collector::init_future(set_boxed_recorder, client, self.build_config()?).await
     }
 
     fn build_config(self) -> Result<Config, Error> {
@@ -158,7 +145,6 @@ impl Builder {
             default_dimensions: self.default_dimensions,
             storage_resolution: self.storage_resolution.unwrap_or(Resolution::Minute),
             send_interval_secs: self.send_interval_secs.unwrap_or(10),
-            client: self.client,
             shutdown_signal: self
                 .shutdown_signal
                 .unwrap_or_else(|| Box::pin(future::pending()))
@@ -176,7 +162,6 @@ impl fmt::Debug for Builder {
             default_dimensions,
             storage_resolution,
             send_interval_secs,
-            client: _,
             shutdown_signal: _,
             metric_buffer_size,
             force_flush_stream: _,
@@ -186,7 +171,6 @@ impl fmt::Debug for Builder {
             .field("default_dimensions", default_dimensions)
             .field("storage_resolution", storage_resolution)
             .field("send_interval_secs", send_interval_secs)
-            .field("client", &"Box<dyn CloudWatch>")
             .field("shutdown_signal", &"BoxFuture")
             .field("metric_buffer_size", metric_buffer_size)
             .field("force_flush_stream", &"dyn Stream")

@@ -18,13 +18,13 @@ async fn test_flush_on_shutdown() -> Result<(), Box<dyn Error>> {
     tokio::time::pause();
     let (tx, rx) = tokio::sync::oneshot::channel();
     let backend_fut = Box::pin(
-        metrics_cloudwatch::Builder::new_with_client(client.clone())
+        metrics_cloudwatch::Builder::new()
             .cloudwatch_namespace("test-ns")
             .default_dimension("dimension", "default")
             .send_interval_secs(1)
             .storage_resolution(metrics_cloudwatch::Resolution::Second)
             .shutdown_signal(Box::pin(rx.map(|_| ())))
-            .init_future(metrics::set_boxed_recorder),
+            .init_future_mock(client.clone(), metrics::set_boxed_recorder),
     );
     let joinhandle = tokio::spawn(backend_fut);
     tokio::time::advance(Duration::from_millis(5)).await;
