@@ -5,7 +5,7 @@ use aws_sdk_cloudwatch::{config::Region, Client};
 use futures_util::{future, FutureExt, Stream};
 
 use crate::{
-    collector::{self, CloudWatch, Config, Resolution},
+    collector::{self, CloudWatch, Config, RecorderHandle, Resolution},
     error::Error,
     BoxFuture,
 };
@@ -135,9 +135,11 @@ impl Builder {
     /// accidentally using a different `metrics` version than is used in this crate.
     pub fn init_thread(
         self,
-        set_boxed_recorder: fn(Box<dyn metrics::Recorder>) -> Result<(), metrics::SetRecorderError>,
+        set_global_recorder: fn(
+            RecorderHandle,
+        ) -> Result<(), metrics::SetRecorderError<RecorderHandle>>,
     ) -> Result<(), Error> {
-        collector::init(set_boxed_recorder, self.build_config()?);
+        collector::init(set_global_recorder, self.build_config()?);
         Ok(())
     }
 
@@ -147,9 +149,11 @@ impl Builder {
     /// accidentally using a different `metrics` version than is used in this crate.
     pub async fn init_future(
         self,
-        set_boxed_recorder: fn(Box<dyn metrics::Recorder>) -> Result<(), metrics::SetRecorderError>,
+        set_global_recorder: fn(
+            RecorderHandle,
+        ) -> Result<(), metrics::SetRecorderError<RecorderHandle>>,
     ) -> Result<(), Error> {
-        collector::init_future(set_boxed_recorder, self.build_config()?).await
+        collector::init_future(set_global_recorder, self.build_config()?).await
     }
 
     fn build_config(self) -> Result<Config, Error> {
