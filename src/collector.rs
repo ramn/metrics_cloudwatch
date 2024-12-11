@@ -28,6 +28,7 @@ use {
 
 use crate::{error::Error, BoxFuture};
 
+#[doc(hidden)]
 pub trait CloudWatch {
     fn put_metric_data(
         &self,
@@ -70,7 +71,6 @@ pub struct Config {
     pub default_dimensions: BTreeMap<String, String>,
     pub storage_resolution: Resolution,
     pub send_interval_secs: u64,
-    pub client: Box<dyn CloudWatch + Send + Sync>,
     pub shutdown_signal: future::Shared<BoxFuture<'static, ()>>,
     pub metric_buffer_size: usize,
     pub force_flush_stream: Option<Pin<Box<dyn Stream<Item = ()> + Send>>>,
@@ -161,6 +161,7 @@ pub struct RecorderHandle {
 
 pub(crate) fn init(
     set_boxed_recorder: fn(Box<dyn Recorder>) -> Result<(), metrics::SetRecorderError>,
+    client: impl CloudWatch + Send + 'static,
     config: Config,
 ) {
     let _ = thread::spawn(move || {
@@ -170,7 +171,7 @@ pub(crate) fn init(
             .build()
             .unwrap();
         runtime.block_on(async move {
-            if let Err(e) = init_future(set_boxed_recorder, config).await {
+            if let Err(e) = init_future(set_boxed_recorder, client, config).await {
                 log::warn!("{}", e);
             }
         });
@@ -179,15 +180,19 @@ pub(crate) fn init(
 
 pub(crate) async fn init_future(
     set_boxed_recorder: fn(Box<dyn Recorder>) -> Result<(), metrics::SetRecorderError>,
+    client: impl CloudWatch,
     config: Config,
 ) -> Result<(), Error> {
-    let (recorder, task) = new(config);
+    let (recorder, task) = new(client, config);
     set_boxed_recorder(Box::new(recorder)).map_err(Error::SetRecorder)?;
     task.await;
     Ok(())
 }
 
-pub fn new(mut config: Config) -> (RecorderHandle, impl Future<Output = ()>) {
+pub fn new(
+    client: impl CloudWatch,
+    mut config: Config,
+) -> (RecorderHandle, impl Future<Output = ()>) {
     let (collect_sender, mut collect_receiver) = mpsc::channel(1024);
     let (emit_sender, emit_receiver) = mpsc::channel(config.metric_buffer_size);
 
@@ -216,7 +221,7 @@ pub fn new(mut config: Config) -> (RecorderHandle, impl Future<Output = ()>) {
         .take_until(config.shutdown_signal.clone().map(|_| true)),
     );
 
-    let emitter = mk_emitter(emit_receiver, config.client, config.cloudwatch_namespace);
+    let emitter = mk_emitter(emit_receiver, client, config.cloudwatch_namespace);
 
     let internal_config = CollectorConfig {
         default_dimensions: config.default_dimensions,
@@ -264,7 +269,7 @@ where
 
 async fn mk_emitter(
     mut emit_receiver: mpsc::Receiver<Vec<MetricDatum>>,
-    cloudwatch_client: Box<dyn CloudWatch + Send + Sync>,
+    cloudwatch_client: impl CloudWatch,
     cloudwatch_namespace: String,
 ) {
     let cloudwatch_client = &cloudwatch_client;
