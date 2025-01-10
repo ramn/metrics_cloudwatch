@@ -13,6 +13,7 @@ pub struct Builder {
     default_dimensions: BTreeMap<String, String>,
     storage_resolution: Option<Resolution>,
     send_interval_secs: Option<u64>,
+    send_timeout_secs: Option<u64>,
     shutdown_signal: Option<BoxFuture<'static, ()>>,
     metric_buffer_size: usize,
     force_flush_stream: Option<Pin<Box<dyn Stream<Item = ()> + Send>>>,
@@ -34,6 +35,7 @@ impl Builder {
             default_dimensions: Default::default(),
             storage_resolution: Default::default(),
             send_interval_secs: Default::default(),
+            send_timeout_secs: Default::default(),
             shutdown_signal: Default::default(),
             metric_buffer_size: 2048,
             force_flush_stream: Default::default(),
@@ -78,6 +80,14 @@ impl Builder {
     pub fn send_interval_secs(self, secs: u64) -> Self {
         Self {
             send_interval_secs: Some(secs),
+            ..self
+        }
+    }
+
+    /// Sets timeout (seconds) after which a send to CloudWatch will be considered failed
+    pub fn send_timeout_secs(self, secs: u64) -> Self {
+        Self {
+            send_timeout_secs: Some(secs),
             ..self
         }
     }
@@ -150,6 +160,7 @@ impl Builder {
             default_dimensions: self.default_dimensions,
             storage_resolution: self.storage_resolution.unwrap_or(Resolution::Minute),
             send_interval_secs: self.send_interval_secs.unwrap_or(10),
+            send_timeout_secs: self.send_timeout_secs.unwrap_or(4),
             shutdown_signal: self
                 .shutdown_signal
                 .unwrap_or_else(|| Box::pin(future::pending()))
@@ -167,6 +178,7 @@ impl fmt::Debug for Builder {
             default_dimensions,
             storage_resolution,
             send_interval_secs,
+            send_timeout_secs,
             shutdown_signal: _,
             metric_buffer_size,
             force_flush_stream: _,
@@ -176,6 +188,7 @@ impl fmt::Debug for Builder {
             .field("default_dimensions", default_dimensions)
             .field("storage_resolution", storage_resolution)
             .field("send_interval_secs", send_interval_secs)
+            .field("send_timeout_secs", send_timeout_secs)
             .field("shutdown_signal", &"BoxFuture")
             .field("metric_buffer_size", metric_buffer_size)
             .field("force_flush_stream", &"dyn Stream")

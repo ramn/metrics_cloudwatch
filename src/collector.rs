@@ -66,13 +66,14 @@ const MAX_CW_METRICS_PER_CALL: usize = 1000;
 const MAX_CLOUDWATCH_DIMENSIONS: usize = 30;
 const MAX_HISTOGRAM_VALUES: usize = 150;
 const MAX_CW_METRICS_PUT_SIZE: usize = 800_000; // Docs say 1Mb but we set our max lower to be safe since we only have a heuristic
-const SEND_TIMEOUT: Duration = Duration::from_secs(4);
+const RETRY_INTERVAL: Duration = Duration::from_secs(4);
 
 pub struct Config {
     pub cloudwatch_namespace: String,
     pub default_dimensions: BTreeMap<String, String>,
     pub storage_resolution: Resolution,
     pub send_interval_secs: u64,
+    pub send_timeout_secs: u64,
     pub shutdown_signal: future::Shared<BoxFuture<'static, ()>>,
     pub metric_buffer_size: usize,
     pub force_flush_stream: Option<Pin<Box<dyn Stream<Item = ()> + Send>>>,
@@ -229,7 +230,12 @@ pub fn new(
         .take_until(config.shutdown_signal.clone().map(|_| true)),
     );
 
-    let emitter = mk_emitter(emit_receiver, client, config.cloudwatch_namespace);
+    let emitter = mk_emitter(
+        emit_receiver,
+        client,
+        config.cloudwatch_namespace,
+        config.send_timeout_secs,
+    );
 
     let internal_config = CollectorConfig {
         default_dimensions: config.default_dimensions,
@@ -262,16 +268,18 @@ pub fn new(
 
 async fn retry_on_throttled<T, E, F>(
     mut action: impl FnMut() -> F,
+    send_timeout_secs: u64,
 ) -> Result<Result<T, E>, tokio::time::error::Elapsed>
 where
     F: Future<Output = Result<T, E>>,
     E: fmt::Display,
 {
-    match tokio::time::timeout(SEND_TIMEOUT, action()).await {
+    let send_timeout = Duration::from_secs(send_timeout_secs);
+    match tokio::time::timeout(send_timeout, action()).await {
         Ok(Ok(t)) => Ok(Ok(t)),
         Ok(Err(err)) if err.to_string().contains("Throttling") => {
-            tokio::time::sleep(SEND_TIMEOUT).await;
-            tokio::time::timeout(SEND_TIMEOUT, action()).await
+            tokio::time::sleep(RETRY_INTERVAL).await;
+            tokio::time::timeout(send_timeout, action()).await
         }
         Ok(Err(err)) => Ok(Err(err)),
         Err(err) => Err(err),
@@ -282,6 +290,7 @@ async fn mk_emitter(
     mut emit_receiver: mpsc::Receiver<Vec<MetricDatum>>,
     cloudwatch_client: impl CloudWatch,
     cloudwatch_namespace: String,
+    send_timeout_secs: u64,
 ) {
     let cloudwatch_client = &cloudwatch_client;
     let cloudwatch_namespace = &cloudwatch_namespace;
@@ -289,11 +298,14 @@ async fn mk_emitter(
         let chunks: Vec<_> = metrics_chunks(&metrics).collect();
         stream::iter(chunks)
             .for_each(|metric_data| async move {
-                let send_fut = retry_on_throttled(|| async {
-                    cloudwatch_client
-                        .put_metric_data(cloudwatch_namespace.clone(), metric_data.to_owned())
-                        .await
-                });
+                let send_fut = retry_on_throttled(
+                    || async {
+                        cloudwatch_client
+                            .put_metric_data(cloudwatch_namespace.clone(), metric_data.to_owned())
+                            .await
+                    },
+                    send_timeout_secs,
+                );
                 match send_fut.await {
                     Ok(Ok(_output)) => {
                         log::debug!("Successfully sent a metrics batch to CloudWatch.")
