@@ -17,6 +17,41 @@ fn simple(c: &mut Criterion) {
         .enable_all()
         .build()
         .unwrap();
+
+    runtime.block_on(async {
+        let cloudwatch_client = common::MockCloudWatchClient::default();
+
+        let (_shutdown_sender, receiver) = tokio::sync::oneshot::channel::<()>();
+        let (recorder, task) = collector::new(collector::Config {
+            cloudwatch_namespace: "".into(),
+            default_dimensions: Default::default(),
+            storage_resolution: collector::Resolution::Second,
+            send_interval_secs: 200,
+            client: Box::new(cloudwatch_client.clone()),
+            shutdown_signal: receiver.map(|_| ()).boxed().shared(),
+            metric_buffer_size: 1024,
+            force_flush_stream: Some(Box::pin(futures_util::stream::empty())),
+        });
+        metrics::set_global_recorder(recorder).unwrap();
+        tokio::spawn(task);
+    });
+
+    group
+        .bench_function("increment", |b| {
+            b.to_async(&runtime).iter(|| async {
+                for i in 0..NUM_ENTRIES {
+                    metrics::counter!("counter").increment(1);
+
+                    if i % 100 == 0 {
+                        // Give the emitter a chance to consume the entries we sent so that the
+                        // buffer does not fill up
+                        tokio::task::yield_now().await;
+                    }
+                }
+            });
+        })
+        .throughput(Throughput::Elements(NUM_ENTRIES as u64));
+
     group
         .bench_function("full", |b| {
             b.to_async(&runtime).iter(|| async {
