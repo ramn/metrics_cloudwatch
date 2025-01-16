@@ -249,7 +249,10 @@ pub fn new(
     };
     (
         RecorderHandle {
-            sender: collect_sender,
+            sender: collect_sender.clone(),
+            registry: metrics_util::registry::Registry::new(CloudwatchStorage {
+                sender: collect_sender,
+            }),
         },
         async move {
             futures_util::join!(collection_fut, emitter);
@@ -710,30 +713,56 @@ impl Collector {
     }
 }
 
+struct CloudwatchStorage {
+    sender: mpsc::Sender<Datum>,
+}
+
+impl metrics_util::registry::Storage<Key> for CloudwatchStorage {
+    type Counter = Arc<RecorderHandleKey>;
+    type Gauge = Arc<RecorderHandleKey>;
+    type Histogram = Arc<RecorderHandleKey>;
+
+    fn counter(&self, key: &Key) -> Self::Counter {
+        Arc::new(RecorderHandleKey {
+            key: key.clone(),
+            sender: self.sender.clone(),
+        })
+    }
+
+    fn gauge(&self, key: &Key) -> Self::Gauge {
+        Arc::new(RecorderHandleKey {
+            key: key.clone(),
+            sender: self.sender.clone(),
+        })
+    }
+
+    fn histogram(&self, key: &Key) -> Self::Histogram {
+        Arc::new(RecorderHandleKey {
+            key: key.clone(),
+            sender: self.sender.clone(),
+        })
+    }
+}
+
 pub struct RecorderHandle {
     sender: mpsc::Sender<Datum>,
+    registry: metrics_util::registry::Registry<Key, CloudwatchStorage>,
 }
 
 impl RecorderHandle {
     pub fn register_counter(&self, key: &Key) -> metrics::Counter {
-        metrics::Counter::from_arc(Arc::new(RecorderHandleKey {
-            key: key.clone(),
-            sender: self.sender.clone(),
-        }))
+        self.registry
+            .get_or_create_counter(key, |x| metrics::Counter::from_arc(x.clone()))
     }
 
     pub fn register_gauge(&self, key: &Key) -> metrics::Gauge {
-        metrics::Gauge::from_arc(Arc::new(RecorderHandleKey {
-            key: key.clone(),
-            sender: self.sender.clone(),
-        }))
+        self.registry
+            .get_or_create_gauge(key, |x| metrics::Gauge::from_arc(x.clone()))
     }
 
     pub fn register_histogram(&self, key: &Key) -> metrics::Histogram {
-        metrics::Histogram::from_arc(Arc::new(RecorderHandleKey {
-            key: key.clone(),
-            sender: self.sender.clone(),
-        }))
+        self.registry
+            .get_or_create_histogram(key, |x| metrics::Histogram::from_arc(x.clone()))
     }
 
     pub fn describe_gauge(&self, key: KeyName, unit: Option<Unit>, description: SharedString) {
@@ -767,6 +796,7 @@ impl RecorderHandle {
     }
 }
 
+#[derive(Clone)]
 struct RecorderHandleKey {
     key: Key,
     sender: mpsc::Sender<Datum>,
@@ -1039,7 +1069,10 @@ mod tests {
     #[test]
     fn should_handle_nan_in_record_histogram() {
         let (sender, _receiver) = mpsc::channel(1);
-        let recorder = RecorderHandle { sender };
+        let recorder = RecorderHandle {
+            sender: sender.clone(),
+            registry: metrics_util::registry::Registry::new(CloudwatchStorage { sender }),
+        };
         recorder
             .register_histogram(&Key::from_static_name("my_metric"))
             .record(f64::NAN);
