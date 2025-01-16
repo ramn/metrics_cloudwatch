@@ -23,6 +23,7 @@ chrono = "0.4"
 futures-util = "0.3"
 log = "0.4"
 metrics = { version = "0.23"}
+metrics-util = { version = "0.17", features = ["registry"] }
 ordered-float = "2"
 rand = { version = "0.8", default-features = false, features = [ "small_rng", "std", "std_rng", ] }
 serde_json = "1"
