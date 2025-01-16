@@ -21,14 +21,14 @@ aws-smithy-types-convert = { version = "0.60", features = ["convert-chrono"] }
 chrono = "0.4"
 futures-util = "0.3"
 log = "0.4"
-metrics = { version = "0.23"}
-metrics-util = { version = "0.17", features = ["registry"] }
-ordered-float = "2"
+metrics = "0.24"
+metrics-util = { version = "0.19", features = ["registry"] }
+ordered-float = "4"
 rand = { version = "0.8", default-features = false, features = [ "small_rng", "std", "std_rng", ] }
 tokio = { version = "1", features = ["sync", "time"] }
 
 [dev-dependencies]
-criterion = { version = "0.3", features = ["async_tokio"] }
+criterion = { version = "0.5", features = ["async_tokio"] }
 proptest = "1"
 tokio = { version = "1", features = ["test-util", "macros"] }
 
