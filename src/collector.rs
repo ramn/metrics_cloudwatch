@@ -106,7 +106,7 @@ enum Value {
     },
     Counter(CounterValue),
     Gauge(GaugeValue),
-    Histogram(HistogramValue),
+    Histogram(HistogramValue, usize),
 }
 
 #[derive(Debug)]
@@ -478,9 +478,9 @@ fn accept_datum(
                 }
             }
         }
-        Value::Histogram(value) => {
+        Value::Histogram(value, count) => {
             let aggregate = slot.entry(datum.key).or_default();
-            *aggregate.histogram.entry(value).or_default() += 1;
+            *aggregate.histogram.entry(value).or_default() += count;
         }
     }
 }
@@ -850,11 +850,11 @@ impl RecorderHandleKey {
         });
     }
 
-    fn record_histogram(&self, value: f64) {
+    fn record_histogram(&self, value: f64, count: usize) {
         if value.is_finite() {
             let _ = self.sender.try_send(Datum {
                 key: self.key.clone(),
-                value: Value::Histogram(HistogramValue::new(value).unwrap()),
+                value: Value::Histogram(HistogramValue::new(value).unwrap(), count),
             });
         }
     }
@@ -886,7 +886,11 @@ impl GaugeFn for RecorderHandleKey {
 
 impl HistogramFn for RecorderHandleKey {
     fn record(&self, value: f64) {
-        self.record_histogram(value);
+        self.record_histogram(value, 1);
+    }
+
+    fn record_many(&self, value: f64, count: usize) {
+        self.record_histogram(value, count);
     }
 }
 
