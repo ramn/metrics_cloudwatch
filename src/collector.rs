@@ -935,7 +935,7 @@ fn unit_cloudwatch_str(unit: &Unit) -> Option<&'static str> {
         // Close enough
         Unit::Kibibytes => crate::Unit::Kilobytes,
         Unit::Mebibytes => crate::Unit::Megabytes,
-        Unit::Gigibytes => crate::Unit::Gigabytes,
+        Unit::Gibibytes => crate::Unit::Gigabytes,
         Unit::Tebibytes => crate::Unit::Terabytes,
 
         Unit::Percent => crate::Unit::Percent,
