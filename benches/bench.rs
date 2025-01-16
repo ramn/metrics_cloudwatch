@@ -1,7 +1,7 @@
 use {
     criterion::{criterion_group, Criterion, Throughput},
     futures_util::FutureExt,
-    metrics::Recorder,
+    metrics::Key,
 };
 
 use metrics_cloudwatch::collector;
@@ -17,6 +17,43 @@ fn simple(c: &mut Criterion) {
         .enable_all()
         .build()
         .unwrap();
+
+    runtime.block_on(async {
+        let cloudwatch_client = common::MockCloudWatchClient::default();
+
+        let (_shutdown_sender, receiver) = tokio::sync::oneshot::channel::<()>();
+        let (recorder, task) = collector::new(
+            cloudwatch_client,
+            collector::Config {
+                cloudwatch_namespace: "".into(),
+                default_dimensions: Default::default(),
+                storage_resolution: collector::Resolution::Second,
+                send_interval_secs: 200,
+                shutdown_signal: receiver.map(|_| ()).boxed().shared(),
+                metric_buffer_size: 1024,
+                force_flush_stream: Some(Box::pin(futures_util::stream::empty())),
+            },
+        );
+        metrics::set_global_recorder(recorder).unwrap();
+        tokio::spawn(task);
+    });
+
+    group
+        .bench_function("increment", |b| {
+            b.to_async(&runtime).iter(|| async {
+                for i in 0..NUM_ENTRIES {
+                    metrics::counter!("counter").increment(1);
+
+                    if i % 100 == 0 {
+                        // Give the emitter a chance to consume the entries we sent so that the
+                        // buffer does not fill up
+                        tokio::task::yield_now().await;
+                    }
+                }
+            });
+        })
+        .throughput(Throughput::Elements(NUM_ENTRIES as u64));
+
     group
         .bench_function("full", |b| {
             b.to_async(&runtime).iter(|| async {
@@ -40,15 +77,22 @@ fn simple(c: &mut Criterion) {
 
                 for i in 0..NUM_ENTRIES {
                     match i % 3 {
-                        0 => recorder.increment_counter(&metrics::Key::from("counter"), 1),
-                        1 => recorder.update_gauge(
-                            &metrics::Key::from("gauge"),
-                            metrics::GaugeValue::Absolute((i as i64 % 100) as f64),
-                        ),
-                        2 => recorder.record_histogram(
-                            &metrics::Key::from("histogram"),
-                            (i as u64 % 10) as f64,
-                        ),
+                        0 => {
+                            let key = Key::from("counter");
+                            recorder.register_counter(&key).increment(1);
+                        }
+                        1 => {
+                            let key = Key::from("gauge");
+
+                            recorder.register_gauge(&key).set((i as i64 % 100) as f64);
+                        }
+                        2 => {
+                            let key = Key::from("histogram");
+
+                            recorder
+                                .register_histogram(&key)
+                                .record((i as u64 % 10) as f64);
+                        }
                         _ => unreachable!(),
                     }
                     if i % 100 == 0 {
