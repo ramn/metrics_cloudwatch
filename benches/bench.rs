@@ -22,16 +22,18 @@ fn simple(c: &mut Criterion) {
         let cloudwatch_client = common::MockCloudWatchClient::default();
 
         let (_shutdown_sender, receiver) = tokio::sync::oneshot::channel::<()>();
-        let (recorder, task) = collector::new(collector::Config {
-            cloudwatch_namespace: "".into(),
-            default_dimensions: Default::default(),
-            storage_resolution: collector::Resolution::Second,
-            send_interval_secs: 200,
-            client: Box::new(cloudwatch_client.clone()),
-            shutdown_signal: receiver.map(|_| ()).boxed().shared(),
-            metric_buffer_size: 1024,
-            force_flush_stream: Some(Box::pin(futures_util::stream::empty())),
-        });
+        let (recorder, task) = collector::new(
+            cloudwatch_client,
+            collector::Config {
+                cloudwatch_namespace: "".into(),
+                default_dimensions: Default::default(),
+                storage_resolution: collector::Resolution::Second,
+                send_interval_secs: 200,
+                shutdown_signal: receiver.map(|_| ()).boxed().shared(),
+                metric_buffer_size: 1024,
+                force_flush_stream: Some(Box::pin(futures_util::stream::empty())),
+            },
+        );
         metrics::set_global_recorder(recorder).unwrap();
         tokio::spawn(task);
     });
