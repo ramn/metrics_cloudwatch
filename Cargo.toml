@@ -28,9 +28,10 @@ rand = { version = "0.8", default-features = false, features = [ "small_rng", "s
 tokio = { version = "1", features = ["sync", "time"] }
 
 [dev-dependencies]
+aws-config = "1"
 criterion = { version = "0.5", features = ["async_tokio"] }
 proptest = "1"
-tokio = { version = "1", features = ["test-util", "macros"] }
+tokio = { version = "1", features = ["test-util", "macros", "rt-multi-thread"] }
 
 
 [[bench]]
