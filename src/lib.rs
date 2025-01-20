@@ -12,6 +12,10 @@ mod builder;
 pub mod collector;
 mod error;
 
+#[doc = include_str!("../README.md")]
+#[cfg(doctest)]
+pub struct ReadmeDoctests;
+
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 // From the CloudWatch docs:
