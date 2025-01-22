@@ -17,3 +17,5 @@ jobs:
         run: cargo fmt -- --check && ./clippy.sh
       - name: Test
         run: cargo test --all-targets --features "${FEATURES}"
+      - name: Check no-default-features
+        run: cargo check --all-targets --no-default-features
