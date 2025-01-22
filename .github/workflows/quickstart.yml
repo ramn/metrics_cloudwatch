@@ -6,7 +6,14 @@ jobs:
   build:
     runs-on: ubuntu-latest
 
+    env:
+      # All features except integration-test as we haven't setup an AWS account on github CI for those to work
+      FEATURES: "gzip"
+
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo fmt -- --check && ./clippy.sh && cargo test && cargo test --benches
+      - name: Lint
+        run: cargo fmt -- --check && ./clippy.sh
+      - name: Test
+        run: cargo test --all-targets --features "${FEATURES}"
