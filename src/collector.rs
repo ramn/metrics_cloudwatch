@@ -178,8 +178,11 @@ pub(crate) fn init(
             .build()
             .unwrap();
         runtime.block_on(async move {
-            if let Err(e) = init_future(set_global_recorder, client, config).await {
-                log::warn!("{}", e);
+            match init_future(set_global_recorder, client, config).await {
+                Err(e) => {
+                    log::warn!("{}", e);
+                }
+                Ok(task) => task.await,
             }
         });
     });
@@ -191,11 +194,10 @@ pub(crate) async fn init_future(
     ) -> Result<(), metrics::SetRecorderError<RecorderHandle>>,
     client: impl CloudWatch,
     config: Config,
-) -> Result<(), Error> {
+) -> Result<impl Future<Output = ()>, Error> {
     let (recorder, task) = new(client, config);
     set_global_recorder(recorder).map_err(Error::SetRecorder)?;
-    task.await;
-    Ok(())
+    Ok(task)
 }
 
 pub fn new(

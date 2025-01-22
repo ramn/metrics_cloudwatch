@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, fmt, pin::Pin};
+use std::{collections::BTreeMap, fmt, future::Future, pin::Pin};
 
 use futures_util::{future, FutureExt, Stream};
 
@@ -133,6 +133,7 @@ impl Builder {
     ///
     /// Expects the [metrics::set_global_recorder] function as an argument as a safeguard against
     /// accidentally using a different `metrics` version than is used in this crate.
+    #[deprecated = "Use init_async instead which allows for `metrics` to be fully initialized first before starting the driver task"]
     pub async fn init_future(
         self,
         client: aws_sdk_cloudwatch::Client,
@@ -140,6 +141,24 @@ impl Builder {
             RecorderHandle,
         ) -> Result<(), metrics::SetRecorderError<RecorderHandle>>,
     ) -> Result<(), Error> {
+        let driver =
+            collector::init_future(set_global_recorder, client, self.build_config()?).await?;
+        driver.await;
+        Ok(())
+    }
+
+    /// Initializes the CloudWatch metrics and returns a Future that must be polled to send metrics
+    /// to CloudWatch
+    ///
+    /// Expects the [metrics::set_global_recorder] function as an argument as a safeguard against
+    /// accidentally using a different `metrics` version than is used in this crate.
+    pub async fn init_async(
+        self,
+        client: aws_sdk_cloudwatch::Client,
+        set_global_recorder: fn(
+            RecorderHandle,
+        ) -> Result<(), metrics::SetRecorderError<RecorderHandle>>,
+    ) -> Result<impl Future<Output = ()>, Error> {
         collector::init_future(set_global_recorder, client, self.build_config()?).await
     }
 
@@ -150,7 +169,7 @@ impl Builder {
         set_global_recorder: fn(
             RecorderHandle,
         ) -> Result<(), metrics::SetRecorderError<RecorderHandle>>,
-    ) -> Result<(), Error> {
+    ) -> Result<impl Future<Output = ()>, Error> {
         collector::init_future(set_global_recorder, client, self.build_config()?).await
     }
 
