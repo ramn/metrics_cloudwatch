@@ -1,4 +1,4 @@
-use std::{error::Error, time::Duration};
+use std::time::Duration;
 
 use aws_sdk_cloudwatch::types::{Dimension, StandardUnit, StatisticSet};
 use futures_util::FutureExt;
@@ -7,25 +7,27 @@ use common::MockCloudWatchClient;
 
 mod common;
 
+use anyhow::Result;
+
 fn dim(name: &str, value: &str) -> Dimension {
     Dimension::builder().name(name).value(value).build()
 }
 
 #[tokio::test]
-async fn test_flush_on_shutdown() -> Result<(), Box<dyn Error>> {
+async fn test_flush_on_shutdown() -> Result<()> {
     let client = MockCloudWatchClient::default();
 
     tokio::time::pause();
     let (tx, rx) = tokio::sync::oneshot::channel();
-    let backend_fut = Box::pin(
-        metrics_cloudwatch::Builder::new()
-            .cloudwatch_namespace("test-ns")
-            .default_dimension("dimension", "default")
-            .send_interval_secs(1)
-            .storage_resolution(metrics_cloudwatch::Resolution::Second)
-            .shutdown_signal(Box::pin(rx.map(|_| ())))
-            .init_future_mock(client.clone(), metrics::set_global_recorder),
-    );
+    let backend_fut = metrics_cloudwatch::Builder::new()
+        .cloudwatch_namespace("test-ns")
+        .default_dimension("dimension", "default")
+        .send_interval_secs(1)
+        .storage_resolution(metrics_cloudwatch::Resolution::Second)
+        .shutdown_signal(Box::pin(rx.map(|_| ())))
+        .init_future_mock(client.clone(), metrics::set_global_recorder)
+        .await?;
+
     let joinhandle = tokio::spawn(backend_fut);
     tokio::time::advance(Duration::from_millis(5)).await;
 
@@ -46,7 +48,7 @@ async fn test_flush_on_shutdown() -> Result<(), Box<dyn Error>> {
 
     // Send shutdown signal
     tx.send(()).unwrap();
-    joinhandle.await??;
+    joinhandle.await?;
 
     let actual = client.put_metric_data.lock().unwrap();
     assert_eq!(actual.len(), 1);

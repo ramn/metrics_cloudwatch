@@ -67,6 +67,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "55cc3b69f167a1ef2e161439aa98aed94e6028e5f9a59be9a6ffb47aef1651f9"
 
 [[package]]
+name = "anyhow"
+version = "1.0.95"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "34ac096ce696dc2fcabef30516bb13c0a68a11d30131d3df6f04711467681b04"
+
+[[package]]
 name = "autocfg"
 version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1357,11 +1363,13 @@ name = "metrics_cloudwatch"
 version = "4.0.0"
 dependencies = [
  "ahash",
+ "anyhow",
  "aws-config",
  "aws-sdk-cloudwatch",
  "aws-smithy-types-convert",
  "chrono",
  "criterion",
+ "flate2",
  "futures-util",
  "log",
  "metrics",
