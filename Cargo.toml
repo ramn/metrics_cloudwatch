@@ -26,13 +26,19 @@ metrics-util = { version = "0.20", features = ["registry"] }
 ordered-float = "5"
 rand = { version = "0.9", default-features = false, features = [ "small_rng", "std", "std_rng", ] }
 tokio = { version = "1", features = ["sync", "time"] }
+flate2 = { version = "1", optional = true }
+
 
 [dev-dependencies]
+anyhow = "1"
 aws-config = "1"
 criterion = { version = "0.7", features = ["async_tokio"] }
 proptest = "1"
 tokio = { version = "1", features = ["test-util", "macros", "rt-multi-thread"] }
 
+[features]
+gzip = ["flate2"]
+integration-test = ["gzip"]
 
 [[bench]]
 name = "bench"
