@@ -34,7 +34,7 @@ use crate::{error::Error, BoxFuture};
 pub trait CloudWatch {
     fn put_metric_data(
         &self,
-        namespace: String,
+        config: &Config,
         data: Vec<MetricDatum>,
     ) -> BoxFuture<'_, Result<(), SdkError<PutMetricDataError>>>;
 }
@@ -42,13 +42,54 @@ pub trait CloudWatch {
 impl CloudWatch for Client {
     fn put_metric_data(
         &self,
-        namespace: String,
+        config: &Config,
         data: Vec<MetricDatum>,
     ) -> BoxFuture<'_, Result<(), SdkError<PutMetricDataError>>> {
         let put = self.put_metric_data();
+        let namespace = config.cloudwatch_namespace.clone();
+        #[cfg(feature = "gzip")]
+        let gzip = config.gzip;
+        #[allow(unused_mut)]
         async move {
             put.namespace(namespace)
                 .set_metric_data(Some(data))
+                .customize()
+                .map_request(move |request| {
+                    #[cfg(feature = "gzip")]
+                    if gzip {
+                        use std::io::Write;
+
+                        let mut request = request;
+
+                        // If the request is already encoded upstream has most likely implemented gzipping, so don't gzip it again
+                        if let Some(content_encoding) = request.headers().get("content-encoding") {
+                            log::trace!(
+                                "PutMetricData request is already encoded: {:?}",
+                                content_encoding
+                            );
+                        } else {
+                            let body = request.body_mut();
+
+                            if let Some(bytes) = body.bytes() {
+                                let mut encoder = flate2::write::GzEncoder::new(
+                                    Vec::new(),
+                                    flate2::Compression::default(),
+                                );
+                                encoder.write_all(bytes)?;
+
+                                let r = encoder.finish()?;
+                                let r_len = r.len() as u64;
+                                *body = r.into();
+                                request.headers_mut().insert("content-encoding", "gzip");
+                                request
+                                    .headers_mut()
+                                    .insert("content-length", r_len.to_string());
+                            }
+                        }
+                        return Ok::<_, std::io::Error>(request);
+                    }
+                    Ok::<_, std::io::Error>(request)
+                })
                 .send()
                 .await
                 .map(|_| ())
@@ -68,6 +109,7 @@ const MAX_HISTOGRAM_VALUES: usize = 150;
 const MAX_CW_METRICS_PUT_SIZE: usize = 800_000; // Docs say 1Mb but we set our max lower to be safe since we only have a heuristic
 const RETRY_INTERVAL: Duration = Duration::from_secs(4);
 
+// Only public for tests/common/mock.rs
 pub struct Config {
     pub cloudwatch_namespace: String,
     pub default_dimensions: BTreeMap<String, String>,
@@ -76,7 +118,8 @@ pub struct Config {
     pub send_timeout_secs: u64,
     pub shutdown_signal: future::Shared<BoxFuture<'static, ()>>,
     pub metric_buffer_size: usize,
-    pub force_flush_stream: Option<Pin<Box<dyn Stream<Item = ()> + Send>>>,
+    #[cfg(feature = "gzip")]
+    pub gzip: bool,
 }
 
 struct CollectorConfig {
@@ -170,6 +213,7 @@ pub(crate) fn init(
     ) -> Result<(), metrics::SetRecorderError<RecorderHandle>>,
     client: impl CloudWatch + Send + 'static,
     config: Config,
+    force_flush_stream: Option<Pin<Box<dyn Stream<Item = ()> + Send>>>,
 ) {
     let _ = thread::spawn(move || {
         // single threaded
@@ -178,7 +222,7 @@ pub(crate) fn init(
             .build()
             .unwrap();
         runtime.block_on(async move {
-            match init_future(set_global_recorder, client, config).await {
+            match init_future(set_global_recorder, client, config, force_flush_stream).await {
                 Err(e) => {
                     log::warn!("{}", e);
                 }
@@ -194,22 +238,22 @@ pub(crate) async fn init_future(
     ) -> Result<(), metrics::SetRecorderError<RecorderHandle>>,
     client: impl CloudWatch,
     config: Config,
+    force_flush_stream: Option<Pin<Box<dyn Stream<Item = ()> + Send>>>,
 ) -> Result<impl Future<Output = ()>, Error> {
-    let (recorder, task) = new(client, config);
+    let (recorder, task) = new(client, config, force_flush_stream);
     set_global_recorder(recorder).map_err(Error::SetRecorder)?;
     Ok(task)
 }
 
 pub fn new(
     client: impl CloudWatch,
-    mut config: Config,
+    config: Config,
+    force_flush_stream: Option<Pin<Box<dyn Stream<Item = ()> + Send>>>,
 ) -> (RecorderHandle, impl Future<Output = ()>) {
     let (collect_sender, mut collect_receiver) = mpsc::channel(1024);
     let (emit_sender, emit_receiver) = mpsc::channel(config.metric_buffer_size);
 
-    let force_flush_stream = config
-        .force_flush_stream
-        .take()
+    let force_flush_stream = force_flush_stream
         .unwrap_or_else(|| {
             Box::pin(futures_util::stream::empty::<()>()) as Pin<Box<dyn Stream<Item = ()> + Send>>
         })
@@ -232,17 +276,12 @@ pub fn new(
         .take_until(config.shutdown_signal.clone().map(|_| true)),
     );
 
-    let emitter = mk_emitter(
-        emit_receiver,
-        client,
-        config.cloudwatch_namespace,
-        config.send_timeout_secs,
-    );
-
     let internal_config = CollectorConfig {
-        default_dimensions: config.default_dimensions,
-        storage_resolution: config.storage_resolution,
+        default_dimensions: config.default_dimensions.clone(),
+        storage_resolution: config.storage_resolution.clone(),
     };
+
+    let emitter = mk_emitter(emit_receiver, client, config);
 
     let mut collector = Collector::new(internal_config);
     let collection_fut = async move {
@@ -291,41 +330,36 @@ where
 async fn mk_emitter(
     mut emit_receiver: mpsc::Receiver<Vec<MetricDatum>>,
     cloudwatch_client: impl CloudWatch,
-    cloudwatch_namespace: String,
-    send_timeout_secs: u64,
+    config: Config,
 ) {
     let cloudwatch_client = &cloudwatch_client;
-    let cloudwatch_namespace = &cloudwatch_namespace;
     while let Some(metrics) = emit_receiver.recv().await {
-        let chunks: Vec<_> = metrics_chunks(&metrics).collect();
-        stream::iter(chunks)
-            .for_each(|metric_data| async move {
-                let send_fut = retry_on_throttled(
-                    || async {
-                        cloudwatch_client
-                            .put_metric_data(cloudwatch_namespace.clone(), metric_data.to_owned())
-                            .await
-                    },
-                    send_timeout_secs,
-                );
-                match send_fut.await {
-                    Ok(Ok(_output)) => {
-                        log::debug!("Successfully sent a metrics batch to CloudWatch.")
-                    }
-                    Ok(Err(e)) => log::warn!(
-                        "Failed to send metrics: {:?}: {}",
-                        metric_data
-                            .iter()
-                            .map(|m| &m.metric_name)
-                            .collect::<Vec<_>>(),
-                        e,
-                    ),
-                    Err(tokio::time::error::Elapsed { .. }) => {
-                        log::warn!("Failed to send metrics: send timeout")
-                    }
+        for metric_data in metrics_chunks(&metrics) {
+            let send_fut = retry_on_throttled(
+                || async {
+                    cloudwatch_client
+                        .put_metric_data(&config, metric_data.to_owned())
+                        .await
+                },
+                config.send_timeout_secs,
+            );
+            match send_fut.await {
+                Ok(Ok(_output)) => {
+                    log::debug!("Successfully sent a metrics batch to CloudWatch.")
                 }
-            })
-            .await;
+                Ok(Err(e)) => log::warn!(
+                    "Failed to send metrics: {:?}: {}",
+                    metric_data
+                        .iter()
+                        .map(|m| &m.metric_name)
+                        .collect::<Vec<_>>(),
+                    e,
+                ),
+                Err(tokio::time::error::Elapsed { .. }) => {
+                    log::warn!("Failed to send metrics: send timeout")
+                }
+            }
+        }
     }
 }
 

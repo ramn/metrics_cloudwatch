@@ -7,7 +7,7 @@ use aws_sdk_cloudwatch::{
     types::MetricDatum,
 };
 use futures_util::FutureExt;
-use metrics_cloudwatch::collector::CloudWatch;
+use metrics_cloudwatch::collector::{CloudWatch, Config};
 
 #[derive(Clone, Default)]
 pub struct MockCloudWatchClient {
@@ -17,11 +17,11 @@ pub struct MockCloudWatchClient {
 impl CloudWatch for MockCloudWatchClient {
     fn put_metric_data(
         &self,
-        namespace: String,
+        config: &Config,
         data: Vec<MetricDatum>,
     ) -> metrics_cloudwatch::BoxFuture<'_, Result<(), SdkError<PutMetricDataError>>> {
         let data = PutMetricDataInput::builder()
-            .namespace(namespace)
+            .namespace(config.cloudwatch_namespace.clone())
             .set_metric_data(Some(data))
             .build()
             .unwrap();
