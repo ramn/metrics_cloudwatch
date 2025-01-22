@@ -191,6 +191,7 @@ impl Builder {
         collector::init_future(set_global_recorder, client, config, force_flush_stream).await
     }
 
+    #[allow(clippy::type_complexity)]
     fn build_config(
         self,
     ) -> Result<(Config, Option<Pin<Box<dyn Stream<Item = ()> + Send>>>), Error> {
