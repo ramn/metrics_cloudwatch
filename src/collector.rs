@@ -278,7 +278,7 @@ pub fn new(
 
     let internal_config = CollectorConfig {
         default_dimensions: config.default_dimensions.clone(),
-        storage_resolution: config.storage_resolution.clone(),
+        storage_resolution: config.storage_resolution,
     };
 
     let emitter = mk_emitter(emit_receiver, client, config);
