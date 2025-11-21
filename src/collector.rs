@@ -587,7 +587,7 @@ impl Collector {
     ///
     /// # Params
     /// * send_all_before: All messages before this timestamp should be split off from the
-    ///                    aggregation and sent to CloudWatch
+    ///   aggregation and sent to CloudWatch
     fn accept_send_batch(
         &mut self,
         send_all_before: Timestamp,
