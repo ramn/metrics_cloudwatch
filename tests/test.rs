@@ -27,7 +27,7 @@ async fn test_flush_on_shutdown() -> Result<(), Box<dyn Error>> {
             .init_future_mock(client.clone(), metrics::set_global_recorder),
     );
     let joinhandle = tokio::spawn(backend_fut);
-    tokio::time::advance(Duration::from_millis(5)).await;
+    tokio::time::sleep(Duration::from_millis(5)).await;
 
     for i in 0..150 {
         metrics::histogram!("test").record(i);
@@ -42,7 +42,7 @@ async fn test_flush_on_shutdown() -> Result<(), Box<dyn Error>> {
     metrics::gauge!("gauge").set(100.0);
     metrics::gauge!("gauge").set(200.0);
 
-    tokio::time::advance(Duration::from_millis(5)).await;
+    tokio::time::sleep(Duration::from_millis(5)).await;
 
     // Send shutdown signal
     tx.send(()).unwrap();
