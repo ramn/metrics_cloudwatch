@@ -431,7 +431,7 @@ fn jitter_interval_at(
 fn mk_send_batch_timer(
     emit_sender: mpsc::Sender<Vec<MetricDatum>>,
     config: &Config,
-) -> impl Stream<Item = Message> {
+) -> impl Stream<Item = Message> + 'static + use<> {
     let interval = Duration::from_secs(config.send_interval_secs);
     let storage_resolution = config.storage_resolution;
     jitter_interval_at(tokio::time::Instant::now(), interval).map(move |_instant| {
