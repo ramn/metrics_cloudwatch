@@ -55,7 +55,7 @@ impl CloudWatch for Client {
                 .customize()
                 .map_request(move |request| {
                     #[cfg(feature = "gzip")]
-                    if dbg!(gzip) {
+                    if gzip {
                         use std::io::Write;
 
                         let mut request = request;
@@ -353,7 +353,7 @@ async fn mk_emitter(
                         .iter()
                         .map(|m| &m.metric_name)
                         .collect::<Vec<_>>(),
-                    e,
+                    aws_sdk_cloudwatch::error::DisplayErrorContext(&e)
                 ),
                 Err(tokio::time::error::Elapsed { .. }) => {
                     log::warn!("Failed to send metrics: send timeout")
