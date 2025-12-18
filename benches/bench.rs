@@ -1,5 +1,5 @@
 use {
-    criterion::{criterion_group, Criterion, Throughput},
+    criterion::{Criterion, Throughput, criterion_group},
     futures_util::FutureExt,
     metrics::Key,
 };
@@ -22,20 +22,16 @@ fn simple(c: &mut Criterion) {
         let cloudwatch_client = common::MockCloudWatchClient::default();
 
         let (_shutdown_sender, receiver) = tokio::sync::oneshot::channel::<()>();
-        let (recorder, task) = collector::new(
-            cloudwatch_client,
-            collector::Config {
-                cloudwatch_namespace: "".into(),
-                default_dimensions: Default::default(),
-                storage_resolution: collector::Resolution::Second,
-                send_interval_secs: 200,
-                send_timeout_secs: 10,
-                shutdown_signal: receiver.map(|_| ()).boxed().shared(),
-                metric_buffer_size: 1024,
-                force_flush_stream: Some(Box::pin(futures_util::stream::empty())),
-            },
-        );
-        metrics::set_global_recorder(recorder).unwrap();
+        let task = metrics_cloudwatch::Builder::new()
+            .cloudwatch_namespace("metrics-cloudwatch-bench")
+            .storage_resolution(collector::Resolution::Second)
+            .send_interval_secs(200)
+            .send_timeout_secs(10)
+            .shutdown_signal(receiver.map(|_| ()).boxed())
+            .metric_buffer_size(1024)
+            .init_future_mock(cloudwatch_client, metrics::set_global_recorder)
+            .await
+            .unwrap();
         tokio::spawn(task);
     });
 
@@ -71,8 +67,10 @@ fn simple(c: &mut Criterion) {
                         send_timeout_secs: 10,
                         shutdown_signal: receiver.map(|_| ()).boxed().shared(),
                         metric_buffer_size: 1024,
-                        force_flush_stream: Some(Box::pin(futures_util::stream::empty())),
+                        #[cfg(feature = "gzip")]
+                        gzip: false,
                     },
+                    Some(Box::pin(futures_util::stream::empty())),
                 );
 
                 let task = tokio::spawn(task);

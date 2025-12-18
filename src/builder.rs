@@ -1,11 +1,11 @@
 use std::{collections::BTreeMap, fmt, future::Future, pin::Pin};
 
-use futures_util::{future, FutureExt, Stream};
+use futures_util::{FutureExt, Stream, future};
 
 use crate::{
+    BoxFuture,
     collector::{self, CloudWatch, Config, RecorderHandle, Resolution},
     error::Error,
-    BoxFuture,
 };
 
 pub struct Builder {
@@ -17,6 +17,9 @@ pub struct Builder {
     shutdown_signal: Option<BoxFuture<'static, ()>>,
     metric_buffer_size: usize,
     force_flush_stream: Option<Pin<Box<dyn Stream<Item = ()> + Send>>>,
+
+    #[cfg(feature = "gzip")]
+    gzip: bool,
 }
 
 fn extract_namespace(cloudwatch_namespace: Option<String>) -> Result<String, Error> {
@@ -39,6 +42,9 @@ impl Builder {
             shutdown_signal: Default::default(),
             metric_buffer_size: 2048,
             force_flush_stream: Default::default(),
+
+            #[cfg(feature = "gzip")]
+            gzip: true,
         }
     }
 
@@ -114,6 +120,14 @@ impl Builder {
         }
     }
 
+    /// Whether to gzip the payload before sending it to CloudWatch.
+    ///
+    /// Default: true
+    #[cfg(feature = "gzip")]
+    pub fn gzip(self, gzip: bool) -> Self {
+        Self { gzip, ..self }
+    }
+
     /// Initializes the CloudWatch metrics backend and runs it in a new thread.
     ///
     /// Expects the [metrics::set_global_recorder] function as an argument as a safeguard against
@@ -125,7 +139,8 @@ impl Builder {
             RecorderHandle,
         ) -> Result<(), metrics::SetRecorderError<RecorderHandle>>,
     ) -> Result<(), Error> {
-        collector::init(set_global_recorder, client, self.build_config()?);
+        let (config, force_flush_stream) = self.build_config()?;
+        collector::init(set_global_recorder, client, config, force_flush_stream);
         Ok(())
     }
 
@@ -141,8 +156,9 @@ impl Builder {
             RecorderHandle,
         ) -> Result<(), metrics::SetRecorderError<RecorderHandle>>,
     ) -> Result<(), Error> {
+        let (config, force_flush_stream) = self.build_config()?;
         let driver =
-            collector::init_future(set_global_recorder, client, self.build_config()?).await?;
+            collector::init_future(set_global_recorder, client, config, force_flush_stream).await?;
         driver.await;
         Ok(())
     }
@@ -159,7 +175,8 @@ impl Builder {
             RecorderHandle,
         ) -> Result<(), metrics::SetRecorderError<RecorderHandle>>,
     ) -> Result<impl Future<Output = ()>, Error> {
-        collector::init_future(set_global_recorder, client, self.build_config()?).await
+        let (config, force_flush_stream) = self.build_config()?;
+        collector::init_future(set_global_recorder, client, config, force_flush_stream).await
     }
 
     #[doc(hidden)]
@@ -170,23 +187,31 @@ impl Builder {
             RecorderHandle,
         ) -> Result<(), metrics::SetRecorderError<RecorderHandle>>,
     ) -> Result<impl Future<Output = ()>, Error> {
-        collector::init_future(set_global_recorder, client, self.build_config()?).await
+        let (config, force_flush_stream) = self.build_config()?;
+        collector::init_future(set_global_recorder, client, config, force_flush_stream).await
     }
 
-    fn build_config(self) -> Result<Config, Error> {
-        Ok(Config {
-            cloudwatch_namespace: extract_namespace(self.cloudwatch_namespace)?,
-            default_dimensions: self.default_dimensions,
-            storage_resolution: self.storage_resolution.unwrap_or(Resolution::Minute),
-            send_interval_secs: self.send_interval_secs.unwrap_or(10),
-            send_timeout_secs: self.send_timeout_secs.unwrap_or(4),
-            shutdown_signal: self
-                .shutdown_signal
-                .unwrap_or_else(|| Box::pin(future::pending()))
-                .shared(),
-            metric_buffer_size: self.metric_buffer_size,
-            force_flush_stream: self.force_flush_stream,
-        })
+    #[allow(clippy::type_complexity)]
+    fn build_config(
+        self,
+    ) -> Result<(Config, Option<Pin<Box<dyn Stream<Item = ()> + Send>>>), Error> {
+        Ok((
+            Config {
+                cloudwatch_namespace: extract_namespace(self.cloudwatch_namespace)?,
+                default_dimensions: self.default_dimensions,
+                storage_resolution: self.storage_resolution.unwrap_or(Resolution::Minute),
+                send_interval_secs: self.send_interval_secs.unwrap_or(10),
+                send_timeout_secs: self.send_timeout_secs.unwrap_or(4),
+                shutdown_signal: self
+                    .shutdown_signal
+                    .unwrap_or_else(|| Box::pin(future::pending()))
+                    .shared(),
+                metric_buffer_size: self.metric_buffer_size,
+                #[cfg(feature = "gzip")]
+                gzip: self.gzip,
+            },
+            self.force_flush_stream,
+        ))
     }
 }
 
@@ -201,16 +226,22 @@ impl fmt::Debug for Builder {
             shutdown_signal: _,
             metric_buffer_size,
             force_flush_stream: _,
+            #[cfg(feature = "gzip")]
+            gzip,
         } = self;
-        f.debug_struct("Builder")
-            .field("cloudwatch_namespace", cloudwatch_namespace)
+        let mut f = f.debug_struct("Builder");
+        f.field("cloudwatch_namespace", cloudwatch_namespace)
             .field("default_dimensions", default_dimensions)
             .field("storage_resolution", storage_resolution)
             .field("send_interval_secs", send_interval_secs)
             .field("send_timeout_secs", send_timeout_secs)
             .field("shutdown_signal", &"BoxFuture")
             .field("metric_buffer_size", metric_buffer_size)
-            .field("force_flush_stream", &"dyn Stream")
-            .finish()
+            .field("force_flush_stream", &"dyn Stream");
+
+        #[cfg(feature = "gzip")]
+        f.field("gzip", gzip);
+
+        f.finish()
     }
 }

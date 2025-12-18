@@ -1,4 +1,4 @@
-use std::{error::Error, time::Duration};
+use std::time::Duration;
 
 use aws_sdk_cloudwatch::types::{Dimension, StandardUnit, StatisticSet};
 use futures_util::FutureExt;
@@ -7,12 +7,14 @@ use common::MockCloudWatchClient;
 
 mod common;
 
+use anyhow::Result;
+
 fn dim(name: &str, value: &str) -> Dimension {
     Dimension::builder().name(name).value(value).build()
 }
 
 #[tokio::test]
-async fn test_flush_on_shutdown() -> Result<(), Box<dyn Error>> {
+async fn test_flush_on_shutdown() -> Result<()> {
     let client = MockCloudWatchClient::default();
 
     tokio::time::pause();

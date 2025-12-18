@@ -2,7 +2,7 @@
 name = "metrics_cloudwatch"
 version = "4.0.0"
 authors = ["ramn <github@rymdimperiet.org>"]
-edition = "2018"
+edition = "2024"
 
 description = "CloudWatch emitter for the metrics crate"
 license = "MIT/Apache-2.0"
@@ -26,13 +26,24 @@ metrics-util = { version = "0.20", features = ["registry"] }
 ordered-float = "5"
 rand = { version = "0.9", default-features = false, features = [ "small_rng", "std", "std_rng", ] }
 tokio = { version = "1", features = ["sync", "time"] }
+flate2 = { version = "1", optional = true }
+
 
 [dev-dependencies]
+anyhow = "1"
 aws-config = "1"
+aws-credential-types = "1.2.11"
+aws-smithy-types = "1"
+aws-smithy-runtime-api = "1"
 criterion = { version = "0.7", features = ["async_tokio"] }
+env_logger = "0.11"
+http-body = "0.4"
 proptest = "1"
 tokio = { version = "1", features = ["test-util", "macros", "rt-multi-thread"] }
 
+[features]
+gzip = ["flate2"]
+integration-test = ["gzip"]
 
 [[bench]]
 name = "bench"

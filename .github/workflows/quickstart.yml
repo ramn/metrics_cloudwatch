@@ -1,12 +1,28 @@
 name: build
 
-on: [push, pull_request]
+on:
+  pull_request:
+  push:
+    branches:
+      - master
 
 jobs:
   build:
     runs-on: ubuntu-latest
 
+    env:
+      # All features except integration-test as we haven't setup an AWS account on github CI for those to work
+      FEATURES: gzip
+      RUST_LOG: trace
+
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo fmt -- --check && ./clippy.sh && cargo test && cargo test --benches
+      - name: Check format
+        run: cargo fmt -- --check
+      - name: Clippy
+        run: ./clippy.sh
+      - name: Test
+        run: cargo test --locked --all-targets --features "${FEATURES}"
+      - name: Check no-default-features
+        run: cargo check --locked --all-targets --no-default-features
