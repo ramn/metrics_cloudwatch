@@ -55,7 +55,7 @@ impl CloudWatch for Client {
                 .customize()
                 .map_request(move |request| {
                     #[cfg(feature = "gzip")]
-                    if gzip {
+                    if dbg!(gzip) {
                         use std::io::Write;
 
                         let mut request = request;
