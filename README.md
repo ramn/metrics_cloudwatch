@@ -23,18 +23,39 @@ cargo add -s metrics metrics_cloudwatch
 ```
 
 ```rust
+
+use futures_util::FutureExt;
+
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sdk_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
         .load()
         .await;
     let client = aws_sdk_cloudwatch::Client::new(&sdk_config);
-    // Initialize the backend
-    tokio::spawn(metrics_cloudwatch::Builder::new()
-        .cloudwatch_namespace("my-namespace")
-        .init_future(client, metrics::set_global_recorder));
 
+
+    let (shutdown_sender, receiver) = tokio::sync::oneshot::channel::<()>();
+
+    // Initialize the backend
+    let driver = metrics_cloudwatch::Builder::new()
+        .shutdown_signal(receiver.map(|_| ()).boxed())
+        .cloudwatch_namespace("my-namespace")
+        .init_async(client, metrics::set_global_recorder)
+        .await?;
+
+    // `metrics_cloudwatch` uses a background task to buffer and send metrics to CloudWatch
+    let metrics_task = tokio::spawn(driver);
+
+    // Run your application, emitting metrics as needed
     metrics::counter!("requests").increment(1);
+
+    // Signal `metrics_task` to shutdown
+    drop(shutdown_sender);
+
+    // Wait for `metrics_task` to flush all buffered metrics before shutting down
+    metrics_task.await?;
+
+    Ok(())
 }
 ```
 
