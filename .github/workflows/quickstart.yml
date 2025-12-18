@@ -18,8 +18,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Lint
-        run: cargo fmt -- --check && ./clippy.sh
+      - name: Check format
+        run: cargo fmt -- --check
+      - name: Clippy
+        run: ./clippy.sh
       - name: Test
         run: cargo test --all-targets --features "${FEATURES}"
       - name: Check no-default-features
