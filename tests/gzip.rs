@@ -3,7 +3,7 @@ use std::future::Future;
 use anyhow::Result;
 use aws_sdk_cloudwatch::{config::http::HttpRequest, error::ConnectorError};
 use aws_smithy_runtime_api::{
-    client::http::{HttpConnector, HttpConnectorFuture, SharedHttpConnector, http_client_fn},
+    client::http::{http_client_fn, HttpConnector, HttpConnectorFuture, SharedHttpConnector},
     http::{Response, StatusCode},
 };
 use aws_smithy_types::body::SdkBody;
@@ -67,13 +67,20 @@ async fn test_gzip_mock() -> Result<()> {
     tokio::time::pause();
 
     let http_client = http_client_fn(|_settings, _runtime_components| {
-        SharedHttpConnector::new(MockHttpConnector(|request: HttpRequest| async move {
+        SharedHttpConnector::new(MockHttpConnector(|mut request: HttpRequest| async move {
             #[cfg(feature = "gzip")]
             {
                 use std::io::Read;
-                assert_eq!(request.headers().get("Content-Encoding"), Some("gzip"));
+                let body = request.body_mut().collect().await.unwrap().to_bytes();
 
-                let body = request.into_body().collect().await.unwrap().to_bytes();
+                assert_eq!(
+                    request.headers().get("Content-Encoding"),
+                    Some("gzip"),
+                    "{:#?} {:?}",
+                    request.headers(),
+                    str::from_utf8(&body)
+                );
+
                 flate2::read::GzDecoder::new(&body[..])
                     .read_to_string(&mut String::new())
                     .unwrap();
