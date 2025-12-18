@@ -23,6 +23,6 @@ jobs:
       - name: Clippy
         run: ./clippy.sh
       - name: Test
-        run: cargo test --all-targets --features "${FEATURES}"
+        run: cargo test --locked --all-targets --features "${FEATURES}"
       - name: Check no-default-features
-        run: cargo check --all-targets --no-default-features
+        run: cargo check --locked --all-targets --no-default-features
