@@ -1,11 +1,11 @@
 use std::{collections::BTreeMap, fmt, future::Future, pin::Pin};
 
-use futures_util::{future, FutureExt, Stream};
+use futures_util::{FutureExt, Stream, future};
 
 use crate::{
+    BoxFuture,
     collector::{self, CloudWatch, Config, RecorderHandle, Resolution},
     error::Error,
-    BoxFuture,
 };
 
 pub struct Builder {

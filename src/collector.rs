@@ -13,22 +13,21 @@ use std::{
 
 use {
     aws_sdk_cloudwatch::{
+        Client,
         error::SdkError,
         operation::put_metric_data::PutMetricDataError,
         primitives::DateTime,
         types::{Dimension, MetricDatum, StandardUnit, StatisticSet},
-        Client,
     },
     futures_util::{
-        future,
+        FutureExt, StreamExt, future,
         stream::{self, Stream},
-        FutureExt, StreamExt,
     },
     metrics::{GaugeValue, Key, Recorder, Unit},
     tokio::sync::mpsc,
 };
 
-use crate::{error::Error, BoxFuture};
+use crate::{BoxFuture, error::Error};
 
 #[doc(hidden)]
 pub trait CloudWatch {
@@ -392,11 +391,7 @@ fn metrics_chunks(mut metrics: &[MetricDatum]) -> impl Iterator<Item = &[MetricD
         let split = fit_metrics(metrics);
         let (chunk, rest) = metrics.split_at(split);
         metrics = rest;
-        if chunk.is_empty() {
-            None
-        } else {
-            Some(chunk)
-        }
+        if chunk.is_empty() { None } else { Some(chunk) }
     })
 }
 
@@ -411,7 +406,7 @@ fn jitter_interval_at(
     start: tokio::time::Instant,
     interval: Duration,
 ) -> impl Stream<Item = tokio::time::Instant> {
-    use rand::{rngs::SmallRng, Rng, SeedableRng};
+    use rand::{Rng, SeedableRng, rngs::SmallRng};
 
     let rng = SmallRng::from_rng(&mut rand::rng());
     let variance = 0.1;

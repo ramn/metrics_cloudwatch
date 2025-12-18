@@ -1,5 +1,5 @@
 use {
-    criterion::{criterion_group, Criterion, Throughput},
+    criterion::{Criterion, Throughput, criterion_group},
     futures_util::FutureExt,
     metrics::Key,
 };

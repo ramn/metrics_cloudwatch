@@ -3,7 +3,7 @@ use std::future::Future;
 use anyhow::Result;
 use aws_sdk_cloudwatch::{config::http::HttpRequest, error::ConnectorError};
 use aws_smithy_runtime_api::{
-    client::http::{http_client_fn, HttpConnector, HttpConnectorFuture, SharedHttpConnector},
+    client::http::{HttpConnector, HttpConnectorFuture, SharedHttpConnector, http_client_fn},
     http::{Response, StatusCode},
 };
 use aws_smithy_types::body::SdkBody;
