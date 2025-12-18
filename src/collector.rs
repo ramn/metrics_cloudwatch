@@ -67,6 +67,7 @@ impl CloudWatch for Client {
                                 content_encoding
                             );
                         } else {
+                            log::trace!("Gzipping PutMetricData request body");
                             let body = request.body_mut();
 
                             if let Some(bytes) = body.bytes() {

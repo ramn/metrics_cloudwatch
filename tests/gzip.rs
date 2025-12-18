@@ -62,6 +62,8 @@ where
 
 #[tokio::test]
 async fn test_gzip_mock() -> Result<()> {
+    let _ = env_logger::try_init();
+
     tokio::time::pause();
 
     let http_client = http_client_fn(|_settings, _runtime_components| {
@@ -72,7 +74,6 @@ async fn test_gzip_mock() -> Result<()> {
                 assert_eq!(request.headers().get("Content-Encoding"), Some("gzip"));
 
                 let body = request.into_body().collect().await.unwrap().to_bytes();
-                dbg!(&body);
                 flate2::read::GzDecoder::new(&body[..])
                     .read_to_string(&mut String::new())
                     .unwrap();

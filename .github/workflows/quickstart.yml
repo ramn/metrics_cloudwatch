@@ -9,6 +9,7 @@ jobs:
     env:
       # All features except integration-test as we haven't setup an AWS account on github CI for those to work
       FEATURES: "gzip"
+      RUST_LOG: "trace"
 
     steps:
       - uses: actions/checkout@v4
