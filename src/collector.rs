@@ -407,7 +407,7 @@ fn jitter_interval_at(
     start: tokio::time::Instant,
     interval: Duration,
 ) -> impl Stream<Item = tokio::time::Instant> {
-    use rand::{Rng, SeedableRng, rngs::SmallRng};
+    use rand::{RngExt, SeedableRng, rngs::SmallRng};
 
     let rng = SmallRng::from_rng(&mut rand::rng());
     let variance = 0.1;
