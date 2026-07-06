@@ -17,9 +17,6 @@ pub struct Builder {
     shutdown_signal: Option<BoxFuture<'static, ()>>,
     metric_buffer_size: usize,
     force_flush_stream: Option<Pin<Box<dyn Stream<Item = ()> + Send>>>,
-
-    #[cfg(feature = "gzip")]
-    gzip: bool,
 }
 
 fn extract_namespace(cloudwatch_namespace: Option<String>) -> Result<String, Error> {
@@ -42,9 +39,6 @@ impl Builder {
             shutdown_signal: Default::default(),
             metric_buffer_size: 2048,
             force_flush_stream: Default::default(),
-
-            #[cfg(feature = "gzip")]
-            gzip: true,
         }
     }
 
@@ -118,14 +112,6 @@ impl Builder {
             metric_buffer_size,
             ..self
         }
-    }
-
-    /// Whether to gzip the payload before sending it to CloudWatch.
-    ///
-    /// Default: true
-    #[cfg(feature = "gzip")]
-    pub fn gzip(self, gzip: bool) -> Self {
-        Self { gzip, ..self }
     }
 
     /// Initializes the CloudWatch metrics backend and runs it in a new thread.
@@ -207,8 +193,6 @@ impl Builder {
                     .unwrap_or_else(|| Box::pin(future::pending()))
                     .shared(),
                 metric_buffer_size: self.metric_buffer_size,
-                #[cfg(feature = "gzip")]
-                gzip: self.gzip,
             },
             self.force_flush_stream,
         ))
@@ -226,8 +210,6 @@ impl fmt::Debug for Builder {
             shutdown_signal: _,
             metric_buffer_size,
             force_flush_stream: _,
-            #[cfg(feature = "gzip")]
-            gzip,
         } = self;
         let mut f = f.debug_struct("Builder");
         f.field("cloudwatch_namespace", cloudwatch_namespace)
@@ -238,9 +220,6 @@ impl fmt::Debug for Builder {
             .field("shutdown_signal", &"BoxFuture")
             .field("metric_buffer_size", metric_buffer_size)
             .field("force_flush_stream", &"dyn Stream");
-
-        #[cfg(feature = "gzip")]
-        f.field("gzip", gzip);
 
         f.finish()
     }

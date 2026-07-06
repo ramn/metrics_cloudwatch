@@ -67,8 +67,6 @@ fn simple(c: &mut Criterion) {
                         send_timeout_secs: 10,
                         shutdown_signal: receiver.map(|_| ()).boxed().shared(),
                         metric_buffer_size: 1024,
-                        #[cfg(feature = "gzip")]
-                        gzip: false,
                     },
                     Some(Box::pin(futures_util::stream::empty())),
                 );

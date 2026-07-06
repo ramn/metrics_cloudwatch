@@ -46,50 +46,9 @@ impl CloudWatch for Client {
     ) -> BoxFuture<'_, Result<(), SdkError<PutMetricDataError>>> {
         let put = self.put_metric_data();
         let namespace = config.cloudwatch_namespace.clone();
-        #[cfg(feature = "gzip")]
-        let gzip = config.gzip;
-        #[allow(unused_mut)]
         async move {
             put.namespace(namespace)
                 .set_metric_data(Some(data))
-                .customize()
-                .map_request(move |request| {
-                    #[cfg(feature = "gzip")]
-                    if gzip {
-                        use std::io::Write;
-
-                        let mut request = request;
-
-                        // If the request is already encoded upstream has most likely implemented gzipping, so don't gzip it again
-                        if let Some(content_encoding) = request.headers().get("content-encoding") {
-                            log::trace!(
-                                "PutMetricData request is already encoded: {:?}",
-                                content_encoding
-                            );
-                        } else {
-                            log::trace!("Gzipping PutMetricData request body");
-                            let body = request.body_mut();
-
-                            if let Some(bytes) = body.bytes() {
-                                let mut encoder = flate2::write::GzEncoder::new(
-                                    Vec::new(),
-                                    flate2::Compression::default(),
-                                );
-                                encoder.write_all(bytes)?;
-
-                                let r = encoder.finish()?;
-                                let r_len = r.len() as u64;
-                                *body = r.into();
-                                request.headers_mut().insert("content-encoding", "gzip");
-                                request
-                                    .headers_mut()
-                                    .insert("content-length", r_len.to_string());
-                            }
-                        }
-                        return Ok::<_, std::io::Error>(request);
-                    }
-                    Ok::<_, std::io::Error>(request)
-                })
                 .send()
                 .await
                 .map(|_| ())
@@ -118,8 +77,6 @@ pub struct Config {
     pub send_timeout_secs: u64,
     pub shutdown_signal: future::Shared<BoxFuture<'static, ()>>,
     pub metric_buffer_size: usize,
-    #[cfg(feature = "gzip")]
-    pub gzip: bool,
 }
 
 struct CollectorConfig {
