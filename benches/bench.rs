@@ -65,6 +65,7 @@ fn simple(c: &mut Criterion) {
                         storage_resolution: collector::Resolution::Second,
                         send_interval_secs: 200,
                         send_timeout_secs: 10,
+                        send_retries: 0,
                         shutdown_signal: receiver.map(|_| ()).boxed().shared(),
                         metric_buffer_size: 1024,
                     },
