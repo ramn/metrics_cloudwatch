@@ -14,6 +14,7 @@ pub struct Builder {
     storage_resolution: Option<Resolution>,
     send_interval_secs: Option<u64>,
     send_timeout_secs: Option<u64>,
+    send_retries: Option<u32>,
     shutdown_signal: Option<BoxFuture<'static, ()>>,
     metric_buffer_size: usize,
     force_flush_stream: Option<Pin<Box<dyn Stream<Item = ()> + Send>>>,
@@ -36,6 +37,7 @@ impl Builder {
             storage_resolution: Default::default(),
             send_interval_secs: Default::default(),
             send_timeout_secs: Default::default(),
+            send_retries: Default::default(),
             shutdown_signal: Default::default(),
             metric_buffer_size: 2048,
             force_flush_stream: Default::default(),
@@ -92,6 +94,19 @@ impl Builder {
         }
     }
 
+    /// Sets how many times a failed send to CloudWatch is retried before the metrics are dropped.
+    ///
+    /// Only timeouts, connection failures, throttling and server errors are retried, with
+    /// exponential backoff starting at 1 second.
+    ///
+    /// Default: 3
+    pub fn send_retries(self, retries: u32) -> Self {
+        Self {
+            send_retries: Some(retries),
+            ..self
+        }
+    }
+
     /// Sets a future that acts as a shutdown signal when it completes.
     /// Completion of this future will trigger a final flush of metrics to CloudWatch.
     pub fn shutdown_signal(self, shutdown_signal: BoxFuture<'static, ()>) -> Self {
@@ -101,10 +116,12 @@ impl Builder {
         }
     }
 
-    /// How many metrics that may be buffered before they are dropped.
+    /// How many metric updates may be buffered before they are dropped.
     ///
-    /// Metrics are buffered in a channel that is consumed by the metrics task.
-    /// If there are more metrics produced than the buffer size any excess metrics will be dropped.
+    /// Every `counter!`, `gauge!` and `histogram!` call puts one update in a channel that is
+    /// consumed by the metrics task. Recording never blocks, so if updates are produced in a burst
+    /// larger than the buffer before the task catches up, the excess updates are dropped.
+    /// Dropped updates are counted and reported in a warning log.
     ///
     /// Default: 2048
     pub fn metric_buffer_size(self, metric_buffer_size: usize) -> Self {
@@ -188,6 +205,7 @@ impl Builder {
                 storage_resolution: self.storage_resolution.unwrap_or(Resolution::Minute),
                 send_interval_secs: self.send_interval_secs.unwrap_or(10),
                 send_timeout_secs: self.send_timeout_secs.unwrap_or(4),
+                send_retries: self.send_retries.unwrap_or(3),
                 shutdown_signal: self
                     .shutdown_signal
                     .unwrap_or_else(|| Box::pin(future::pending()))
@@ -207,6 +225,7 @@ impl fmt::Debug for Builder {
             storage_resolution,
             send_interval_secs,
             send_timeout_secs,
+            send_retries,
             shutdown_signal: _,
             metric_buffer_size,
             force_flush_stream: _,
@@ -217,6 +236,7 @@ impl fmt::Debug for Builder {
             .field("storage_resolution", storage_resolution)
             .field("send_interval_secs", send_interval_secs)
             .field("send_timeout_secs", send_timeout_secs)
+            .field("send_retries", send_retries)
             .field("shutdown_signal", &"BoxFuture")
             .field("metric_buffer_size", metric_buffer_size)
             .field("force_flush_stream", &"dyn Stream");

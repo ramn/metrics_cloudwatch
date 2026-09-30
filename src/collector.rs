@@ -1,5 +1,8 @@
 use metrics::{CounterFn, GaugeFn, HistogramFn, KeyName, Metadata, SharedString};
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 use std::{
     collections::BTreeMap,
     fmt,
@@ -14,7 +17,7 @@ use std::{
 use {
     aws_sdk_cloudwatch::{
         Client,
-        error::SdkError,
+        error::{ProvideErrorMetadata, SdkError},
         operation::put_metric_data::PutMetricDataError,
         primitives::DateTime,
         types::{Dimension, MetricDatum, StandardUnit, StatisticSet},
@@ -66,7 +69,11 @@ const MAX_CW_METRICS_PER_CALL: usize = 1000;
 const MAX_CLOUDWATCH_DIMENSIONS: usize = 30;
 const MAX_HISTOGRAM_VALUES: usize = 150;
 const MAX_CW_METRICS_PUT_SIZE: usize = 800_000; // Docs say 1Mb but we set our max lower to be safe since we only have a heuristic
-const RETRY_INTERVAL: Duration = Duration::from_secs(4);
+const INITIAL_RETRY_BACKOFF: Duration = Duration::from_secs(1);
+const MAX_RETRY_BACKOFF: Duration = Duration::from_secs(16);
+/// Number of finished batches that may be queued for sending. When full, the collector waits
+/// for the sender instead of dropping the batch.
+const EMIT_BUFFER_SIZE: usize = 16;
 
 // Only public for tests/common/mock.rs
 pub struct Config {
@@ -75,6 +82,7 @@ pub struct Config {
     pub storage_resolution: Resolution,
     pub send_interval_secs: u64,
     pub send_timeout_secs: u64,
+    pub send_retries: u32,
     pub shutdown_signal: future::Shared<BoxFuture<'static, ()>>,
     pub metric_buffer_size: usize,
 }
@@ -82,6 +90,7 @@ pub struct Config {
 struct CollectorConfig {
     default_dimensions: BTreeMap<String, String>,
     storage_resolution: Resolution,
+    metric_buffer_size: usize,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -139,6 +148,24 @@ struct Collector {
     metrics_data: BTreeMap<Timestamp, HashMap<Key, Aggregate>>,
     metrics_config: HashMap<Key, MetricConfig>,
     config: CollectorConfig,
+    dropped: Arc<AtomicU64>,
+}
+
+/// Sends datums from the recorder to the collector without blocking the caller.
+///
+/// If the buffer is full the datum is dropped and counted, so that the collector can report it.
+#[derive(Clone)]
+struct DatumSender {
+    sender: mpsc::Sender<Datum>,
+    dropped: Arc<AtomicU64>,
+}
+
+impl DatumSender {
+    fn send(&self, datum: Datum) {
+        if self.sender.try_send(datum).is_err() {
+            self.dropped.fetch_add(1, Ordering::Relaxed);
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -207,8 +234,13 @@ pub fn new(
     config: Config,
     force_flush_stream: Option<Pin<Box<dyn Stream<Item = ()> + Send>>>,
 ) -> (RecorderHandle, impl Future<Output = ()>) {
-    let (collect_sender, mut collect_receiver) = mpsc::channel(1024);
-    let (emit_sender, emit_receiver) = mpsc::channel(config.metric_buffer_size);
+    let dropped = Arc::new(AtomicU64::new(0));
+    let (collect_sender, mut collect_receiver) = mpsc::channel(config.metric_buffer_size.max(1));
+    let collect_sender = DatumSender {
+        sender: collect_sender,
+        dropped: dropped.clone(),
+    };
+    let (emit_sender, emit_receiver) = mpsc::channel(EMIT_BUFFER_SIZE);
 
     let force_flush_stream = force_flush_stream
         .unwrap_or_else(|| {
@@ -222,27 +254,35 @@ pub fn new(
             }
         });
 
-    let message_stream = Box::pin(
-        stream::select(
-            stream::select(
-                stream::poll_fn(move |cx| collect_receiver.poll_recv(cx)).map(Message::Datum),
-                mk_send_batch_timer(emit_sender.clone(), &config),
-            ),
-            force_flush_stream,
-        )
-        .take_until(config.shutdown_signal.clone().map(|_| true)),
-    );
+    let send_batch_timer = mk_send_batch_timer(emit_sender.clone(), &config);
+    let shutdown_signal = config.shutdown_signal.clone();
 
     let internal_config = CollectorConfig {
         default_dimensions: config.default_dimensions.clone(),
         storage_resolution: config.storage_resolution,
+        metric_buffer_size: config.metric_buffer_size,
     };
 
     let emitter = mk_emitter(emit_receiver, client, config);
 
-    let mut collector = Collector::new(internal_config);
+    let mut collector = Collector::new(internal_config, dropped);
     let collection_fut = async move {
+        let message_stream = stream::select(
+            stream::select(
+                stream::poll_fn(|cx| collect_receiver.poll_recv(cx)).map(Message::Datum),
+                send_batch_timer,
+            ),
+            force_flush_stream,
+        )
+        .take_until(shutdown_signal.map(|_| true));
         collector.accept_messages(message_stream).await;
+
+        // Accept the updates that were recorded before shutdown but not yet received, so that
+        // they are included in the final flush
+        let pending = stream::iter(std::iter::from_fn(|| collect_receiver.try_recv().ok()))
+            .map(Message::Datum);
+        collector.accept_messages(pending).await;
+
         // Send a final flush on shutdown
         collector
             .accept(Message::SendBatch {
@@ -264,23 +304,74 @@ pub fn new(
     )
 }
 
-async fn retry_on_throttled<T, E, F>(
+enum SendError<E> {
+    Timeout,
+    Sdk(E),
+}
+
+impl<E: std::error::Error + 'static> fmt::Display for SendError<E> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SendError::Timeout => write!(f, "send timeout"),
+            SendError::Sdk(e) => write!(f, "{}", aws_sdk_cloudwatch::error::DisplayErrorContext(e)),
+        }
+    }
+}
+
+/// Whether a failed PutMetricData call is worth retrying: timeouts, connection failures,
+/// throttling and server side errors are. Client errors such as invalid parameters are not.
+fn is_retryable(err: &SendError<SdkError<PutMetricDataError>>) -> bool {
+    match err {
+        SendError::Timeout => true,
+        SendError::Sdk(err) => match err {
+            SdkError::ConstructionFailure(_) => false,
+            SdkError::TimeoutError(_) | SdkError::DispatchFailure(_) => true,
+            SdkError::ResponseError(_) => true,
+            SdkError::ServiceError(ctx) => {
+                let status = ctx.raw().status();
+                status.is_server_error()
+                    || status.as_u16() == 429
+                    || matches!(
+                        err.code(),
+                        Some("Throttling" | "ThrottlingException" | "InternalServiceFault")
+                    )
+            }
+            _ => false,
+        },
+    }
+}
+
+fn retry_backoff(attempt: u32) -> Duration {
+    INITIAL_RETRY_BACKOFF
+        .saturating_mul(1 << attempt.min(16))
+        .min(MAX_RETRY_BACKOFF)
+}
+
+async fn send_with_retries<F>(
     mut action: impl FnMut() -> F,
     send_timeout_secs: u64,
-) -> Result<Result<T, E>, tokio::time::error::Elapsed>
+    retries: u32,
+) -> Result<(), SendError<SdkError<PutMetricDataError>>>
 where
-    F: Future<Output = Result<T, E>>,
-    E: fmt::Display,
+    F: Future<Output = Result<(), SdkError<PutMetricDataError>>>,
 {
     let send_timeout = Duration::from_secs(send_timeout_secs);
-    match tokio::time::timeout(send_timeout, action()).await {
-        Ok(Ok(t)) => Ok(Ok(t)),
-        Ok(Err(err)) if err.to_string().contains("Throttling") => {
-            tokio::time::sleep(RETRY_INTERVAL).await;
-            tokio::time::timeout(send_timeout, action()).await
+    let mut attempt = 0;
+    loop {
+        let result = match tokio::time::timeout(send_timeout, action()).await {
+            Ok(Ok(())) => return Ok(()),
+            Ok(Err(err)) => SendError::Sdk(err),
+            Err(tokio::time::error::Elapsed { .. }) => SendError::Timeout,
+        };
+        if attempt >= retries || !is_retryable(&result) {
+            return Err(result);
         }
-        Ok(Err(err)) => Ok(Err(err)),
-        Err(err) => Err(err),
+        let backoff = retry_backoff(attempt);
+        attempt += 1;
+        log::debug!(
+            "Failed to send metrics ({result}), retrying in {backoff:?} (attempt {attempt} of {retries})"
+        );
+        tokio::time::sleep(backoff).await;
     }
 }
 
@@ -292,29 +383,25 @@ async fn mk_emitter(
     let cloudwatch_client = &cloudwatch_client;
     while let Some(metrics) = emit_receiver.recv().await {
         for metric_data in metrics_chunks(&metrics) {
-            let send_fut = retry_on_throttled(
-                || async {
-                    cloudwatch_client
-                        .put_metric_data(&config, metric_data.to_owned())
-                        .await
-                },
+            let result = send_with_retries(
+                || cloudwatch_client.put_metric_data(&config, metric_data.to_owned()),
                 config.send_timeout_secs,
-            );
-            match send_fut.await {
-                Ok(Ok(_output)) => {
+                config.send_retries,
+            )
+            .await;
+            match result {
+                Ok(()) => {
                     log::debug!("Successfully sent a metrics batch to CloudWatch.")
                 }
-                Ok(Err(e)) => log::warn!(
-                    "Failed to send metrics: {:?}: {}",
+                Err(e) => log::warn!(
+                    "Failed to send metrics, dropping {} datums: {:?}: {}",
+                    metric_data.len(),
                     metric_data
                         .iter()
                         .map(|m| &m.metric_name)
                         .collect::<Vec<_>>(),
-                    aws_sdk_cloudwatch::error::DisplayErrorContext(&e)
+                    e
                 ),
-                Err(tokio::time::error::Elapsed { .. }) => {
-                    log::warn!("Failed to send metrics: send timeout")
-                }
             }
         }
     }
@@ -475,11 +562,23 @@ fn accept_datum(
 }
 
 impl Collector {
-    fn new(config: CollectorConfig) -> Self {
+    fn new(config: CollectorConfig, dropped: Arc<AtomicU64>) -> Self {
         Self {
             metrics_data: Default::default(),
             metrics_config: Default::default(),
             config,
+            dropped,
+        }
+    }
+
+    fn report_dropped(&self) {
+        let dropped = self.dropped.swap(0, Ordering::Relaxed);
+        if dropped > 0 {
+            log::warn!(
+                "Dropped {dropped} metric updates because the metric buffer was full, \
+                 consider increasing `metric_buffer_size` (currently {})",
+                self.config.metric_buffer_size
+            );
         }
     }
 
@@ -510,7 +609,8 @@ impl Collector {
                                         send_all_before,
                                         emit_sender,
                                     } => {
-                                        self.accept_send_batch(send_all_before, emit_sender)?;
+                                        self.accept_send_batch(send_all_before, emit_sender)
+                                            .await?;
                                         break;
                                     }
                                 },
@@ -526,7 +626,7 @@ impl Collector {
                     Message::SendBatch {
                         send_all_before,
                         emit_sender,
-                    } => self.accept_send_batch(send_all_before, emit_sender),
+                    } => self.accept_send_batch(send_all_before, emit_sender).await,
                 }
             };
             if let Err(e) = result.await {
@@ -577,11 +677,13 @@ impl Collector {
     /// # Params
     /// * send_all_before: All messages before this timestamp should be split off from the
     ///   aggregation and sent to CloudWatch
-    fn accept_send_batch(
+    async fn accept_send_batch(
         &mut self,
         send_all_before: Timestamp,
         emit_sender: mpsc::Sender<Vec<MetricDatum>>,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        self.report_dropped();
+
         let mut range = self.metrics_data.split_off(&send_all_before);
         mem::swap(&mut range, &mut self.metrics_data);
 
@@ -701,7 +803,8 @@ impl Collector {
             }
         }
         if !metrics_batch.is_empty() {
-            emit_sender.try_send(metrics_batch)?;
+            // Wait for the emitter rather than dropping a finished batch when sends are slow
+            emit_sender.send(metrics_batch).await?;
         }
         Ok(())
     }
@@ -715,7 +818,7 @@ impl Collector {
 }
 
 struct CloudwatchStorage {
-    sender: mpsc::Sender<Datum>,
+    sender: DatumSender,
 }
 
 impl metrics_util::registry::Storage<Key> for CloudwatchStorage {
@@ -746,7 +849,7 @@ impl metrics_util::registry::Storage<Key> for CloudwatchStorage {
 }
 
 pub struct RecorderHandle {
-    sender: mpsc::Sender<Datum>,
+    sender: DatumSender,
     registry: metrics_util::registry::Registry<Key, CloudwatchStorage>,
 }
 
@@ -767,7 +870,7 @@ impl RecorderHandle {
     }
 
     pub fn describe_gauge(&self, key: KeyName, unit: Option<Unit>, description: SharedString) {
-        let _ = self.sender.try_send(Datum {
+        self.sender.send(Datum {
             key: Key::from_name(key),
             value: Value::Register {
                 unit,
@@ -777,7 +880,7 @@ impl RecorderHandle {
     }
 
     pub fn describe_histogram(&self, key: KeyName, unit: Option<Unit>, description: SharedString) {
-        let _ = self.sender.try_send(Datum {
+        self.sender.send(Datum {
             key: Key::from_name(key),
             value: Value::Register {
                 unit,
@@ -787,7 +890,7 @@ impl RecorderHandle {
     }
 
     pub fn describe_counter(&self, key: KeyName, unit: Option<Unit>, description: SharedString) {
-        let _ = self.sender.try_send(Datum {
+        self.sender.send(Datum {
             key: Key::from_name(key),
             value: Value::Register {
                 unit,
@@ -800,40 +903,40 @@ impl RecorderHandle {
 #[derive(Clone)]
 struct RecorderHandleKey {
     key: Key,
-    sender: mpsc::Sender<Datum>,
+    sender: DatumSender,
 }
 
 impl RecorderHandleKey {
     fn increment_counter(&self, value: u64) {
-        let _ = self.sender.try_send(Datum {
+        self.sender.send(Datum {
             key: self.key.clone(),
             value: Value::Counter(CounterValue::Increase(value)),
         });
     }
 
     fn set_counter(&self, value: u64) {
-        let _ = self.sender.try_send(Datum {
+        self.sender.send(Datum {
             key: self.key.clone(),
             value: Value::Counter(CounterValue::Absolute(value)),
         });
     }
 
     fn increment_gauge(&self, value: f64) {
-        let _ = self.sender.try_send(Datum {
+        self.sender.send(Datum {
             key: self.key.clone(),
             value: Value::Gauge(GaugeValue::Increment(value)),
         });
     }
 
     fn decrement_gauge(&self, value: f64) {
-        let _ = self.sender.try_send(Datum {
+        self.sender.send(Datum {
             key: self.key.clone(),
             value: Value::Gauge(GaugeValue::Decrement(value)),
         });
     }
 
     fn set_gauge(&self, value: f64) {
-        let _ = self.sender.try_send(Datum {
+        self.sender.send(Datum {
             key: self.key.clone(),
             value: Value::Gauge(GaugeValue::Absolute(value)),
         });
@@ -841,7 +944,7 @@ impl RecorderHandleKey {
 
     fn record_histogram(&self, value: f64, count: usize) {
         if value.is_finite() {
-            let _ = self.sender.try_send(Datum {
+            self.sender.send(Datum {
                 key: self.key.clone(),
                 value: Value::Histogram(HistogramValue::new(value).unwrap(), count),
             });
@@ -1009,15 +1112,19 @@ mod tests {
 
     #[test]
     fn should_override_default_dimensions() {
-        let collector = Collector::new(CollectorConfig {
-            default_dimensions: vec![
-                ("second".to_owned(), "123".to_owned()),
-                ("first".to_owned(), "initial-value".to_owned()),
-            ]
-            .into_iter()
-            .collect(),
-            storage_resolution: Resolution::Minute,
-        });
+        let collector = Collector::new(
+            CollectorConfig {
+                default_dimensions: vec![
+                    ("second".to_owned(), "123".to_owned()),
+                    ("first".to_owned(), "initial-value".to_owned()),
+                ]
+                .into_iter()
+                .collect(),
+                storage_resolution: Resolution::Minute,
+                metric_buffer_size: 1,
+            },
+            Default::default(),
+        );
 
         let key = Key::from_parts(
             "my-metric",
@@ -1074,6 +1181,10 @@ mod tests {
     #[test]
     fn should_handle_nan_in_record_histogram() {
         let (sender, _receiver) = mpsc::channel(1);
+        let sender = DatumSender {
+            sender,
+            dropped: Default::default(),
+        };
         let recorder = RecorderHandle {
             sender: sender.clone(),
             registry: metrics_util::registry::Registry::new(CloudwatchStorage { sender }),
