@@ -875,6 +875,8 @@ impl RecorderHandleKey {
 
 /// Lock-free counter storage. `sum` is the window's delta for `increment` and
 /// the last set value for `absolute`; `dirty` keeps a zero-valued write visible.
+/// Only zero-valued writes touch `dirty` (a non-zero write is visible via `sum`),
+/// so a non-zero write can't leak a stray `dirty` into the next window.
 #[derive(Debug, Default)]
 struct CounterCell {
     sum: std::sync::atomic::AtomicU64,
@@ -884,24 +886,29 @@ struct CounterCell {
 impl CounterCell {
     /// Take and reset the value. `None` if nothing was written since the last drain.
     fn drain(&self) -> Option<u64> {
-        use std::sync::atomic::Ordering::AcqRel;
+        use std::sync::atomic::Ordering::Relaxed;
         // `swap` so an increment racing the reset is carried over, not lost.
-        let sum = self.sum.swap(0, AcqRel);
-        let dirty = self.dirty.swap(false, AcqRel);
+        let sum = self.sum.swap(0, Relaxed);
+        let dirty = self.dirty.swap(false, Relaxed);
         (sum != 0 || dirty).then_some(sum)
     }
 }
 
 impl CounterFn for CounterCell {
     fn increment(&self, value: u64) {
-        self.sum
-            .fetch_add(value, std::sync::atomic::Ordering::AcqRel);
-        self.dirty.store(true, std::sync::atomic::Ordering::Release);
+        if value == 0 {
+            self.dirty.store(true, std::sync::atomic::Ordering::Relaxed);
+        } else {
+            self.sum
+                .fetch_add(value, std::sync::atomic::Ordering::Relaxed);
+        }
     }
 
     fn absolute(&self, value: u64) {
-        self.sum.store(value, std::sync::atomic::Ordering::Release);
-        self.dirty.store(true, std::sync::atomic::Ordering::Release);
+        self.sum.store(value, std::sync::atomic::Ordering::Relaxed);
+        if value == 0 {
+            self.dirty.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
     }
 }
 
