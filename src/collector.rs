@@ -135,6 +135,8 @@ struct Collector {
     metrics_data: BTreeMap<Timestamp, HashMap<Key, Aggregate>>,
     metrics_config: HashMap<Key, MetricConfig>,
     config: CollectorConfig,
+    /// Windows before this have been scraped by the timer, so are complete.
+    scraped_until: Timestamp,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -488,6 +490,7 @@ impl Collector {
             metrics_data: Default::default(),
             metrics_config: Default::default(),
             config,
+            scraped_until: 0,
         }
     }
 
@@ -523,6 +526,7 @@ impl Collector {
                                     }
                                     Message::ScrapeCounters(timestamp) => {
                                         self.scrape_counters(timestamp);
+                                        self.scraped_until = timestamp + 1;
                                         break;
                                     }
                                 },
@@ -541,6 +545,7 @@ impl Collector {
                     } => self.accept_send_batch(send_all_before, emit_sender),
                     Message::ScrapeCounters(timestamp) => {
                         self.scrape_counters(timestamp);
+                        self.scraped_until = timestamp + 1;
                         Ok(())
                     }
                 }
@@ -611,9 +616,13 @@ impl Collector {
         emit_sender: mpsc::Sender<Vec<MetricDatum>>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         // Force-flush / shutdown: pick up counts from the still-open window too.
-        if send_all_before == Timestamp::MAX {
+        let send_all_before = if send_all_before == Timestamp::MAX {
             self.scrape_counters(current_timestamp());
-        }
+            send_all_before
+        } else {
+            // Don't send windows whose counters haven't been scraped yet.
+            send_all_before.min(self.scraped_until)
+        };
         let mut range = self.metrics_data.split_off(&send_all_before);
         mem::swap(&mut range, &mut self.metrics_data);
 
