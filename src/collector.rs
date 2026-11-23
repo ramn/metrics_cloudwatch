@@ -96,6 +96,8 @@ enum Message {
         send_all_before: Timestamp,
         emit_sender: mpsc::Sender<Vec<MetricDatum>>,
     },
+    /// Drain the counter cells into the window containing this timestamp.
+    ScrapeCounters(Timestamp),
 }
 
 #[derive(Debug)]
@@ -104,15 +106,8 @@ enum Value {
         unit: Option<Unit>,
         description: Option<SharedString>,
     },
-    Counter(CounterValue),
     Gauge(GaugeValue),
     Histogram(HistogramValue, usize),
-}
-
-#[derive(Debug)]
-enum CounterValue {
-    Increase(u64),
-    Absolute(u64),
 }
 
 #[derive(Clone, Debug, Default)]
@@ -136,6 +131,7 @@ struct Gauge {
 }
 
 struct Collector {
+    registry: Arc<metrics_util::registry::Registry<Key, CloudwatchStorage>>,
     metrics_data: BTreeMap<Timestamp, HashMap<Key, Aggregate>>,
     metrics_config: HashMap<Key, MetricConfig>,
     config: CollectorConfig,
@@ -226,7 +222,10 @@ pub fn new(
         stream::select(
             stream::select(
                 stream::poll_fn(move |cx| collect_receiver.poll_recv(cx)).map(Message::Datum),
-                mk_send_batch_timer(emit_sender.clone(), &config),
+                stream::select(
+                    mk_send_batch_timer(emit_sender.clone(), &config),
+                    mk_scrape_timer(config.storage_resolution),
+                ),
             ),
             force_flush_stream,
         )
@@ -240,7 +239,10 @@ pub fn new(
 
     let emitter = mk_emitter(emit_receiver, client, config);
 
-    let mut collector = Collector::new(internal_config);
+    let registry = Arc::new(metrics_util::registry::Registry::new(CloudwatchStorage {
+        sender: collect_sender.clone(),
+    }));
+    let mut collector = Collector::new(registry.clone(), internal_config);
     let collection_fut = async move {
         collector.accept_messages(message_stream).await;
         // Send a final flush on shutdown
@@ -253,10 +255,8 @@ pub fn new(
     };
     (
         RecorderHandle {
-            sender: collect_sender.clone(),
-            registry: metrics_util::registry::Registry::new(CloudwatchStorage {
-                sender: collect_sender,
-            }),
+            sender: collect_sender,
+            registry,
         },
         async move {
             futures_util::join!(collection_fut, emitter);
@@ -413,6 +413,19 @@ fn time_key(timestamp: Timestamp, resolution: Resolution) -> Timestamp {
     }
 }
 
+/// Fires at each wall-clock `resolution` boundary, so a counter scrape lands
+/// in the window that just closed. Never yields the same boundary twice.
+fn mk_scrape_timer(resolution: Resolution) -> impl Stream<Item = Message> + 'static {
+    let period = resolution.as_secs() as u64;
+    stream::unfold(0, move |last_boundary| async move {
+        let now = time::UNIX_EPOCH.elapsed().unwrap();
+        let boundary = ((now.as_secs() / period + 1) * period).max(last_boundary + period);
+        tokio::time::sleep(Duration::from_secs(boundary).saturating_sub(now)).await;
+        // `boundary - 1` is inside the window that just closed, even if we wake late.
+        Some((Message::ScrapeCounters(boundary - 1), boundary))
+    })
+}
+
 fn get_timeslot<'a>(
     metrics_data: &'a mut BTreeMap<Timestamp, HashMap<Key, Aggregate>>,
     config: &'a CollectorConfig,
@@ -439,15 +452,6 @@ fn accept_datum(
             }
         }
 
-        Value::Counter(value) => {
-            let aggregate = slot.entry(datum.key).or_default();
-            let counter = &mut aggregate.counter;
-            counter.sample_count += 1;
-            counter.sum = match value {
-                CounterValue::Increase(value) => counter.sum + value,
-                CounterValue::Absolute(value) => value,
-            }
-        }
         Value::Gauge(gauge_value) => {
             let aggregate = slot.entry(datum.key).or_default();
 
@@ -475,8 +479,12 @@ fn accept_datum(
 }
 
 impl Collector {
-    fn new(config: CollectorConfig) -> Self {
+    fn new(
+        registry: Arc<metrics_util::registry::Registry<Key, CloudwatchStorage>>,
+        config: CollectorConfig,
+    ) -> Self {
         Self {
+            registry,
             metrics_data: Default::default(),
             metrics_config: Default::default(),
             config,
@@ -513,6 +521,10 @@ impl Collector {
                                         self.accept_send_batch(send_all_before, emit_sender)?;
                                         break;
                                     }
+                                    Message::ScrapeCounters(timestamp) => {
+                                        self.scrape_counters(timestamp);
+                                        break;
+                                    }
                                 },
                                 Poll::Ready(None) => return Ok(()),
                                 Poll::Pending => {
@@ -527,12 +539,28 @@ impl Collector {
                         send_all_before,
                         emit_sender,
                     } => self.accept_send_batch(send_all_before, emit_sender),
+                    Message::ScrapeCounters(timestamp) => {
+                        self.scrape_counters(timestamp);
+                        Ok(())
+                    }
                 }
             };
             if let Err(e) = result.await {
                 log::warn!("Failed to accept message: {}", e);
             }
         }
+    }
+
+    /// Drain every counter cell into the window containing `timestamp`.
+    fn scrape_counters(&mut self, timestamp: Timestamp) {
+        let slot = get_timeslot(&mut self.metrics_data, &self.config, timestamp);
+        self.registry.visit_counters(|key, cell| {
+            if let Some(sum) = cell.drain() {
+                let counter = &mut slot.entry(key.clone()).or_default().counter;
+                counter.sample_count += 1;
+                counter.sum += sum;
+            }
+        });
     }
 
     async fn accept(&mut self, message: Message) {
@@ -582,6 +610,10 @@ impl Collector {
         send_all_before: Timestamp,
         emit_sender: mpsc::Sender<Vec<MetricDatum>>,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        // Force-flush / shutdown: pick up counts from the still-open window too.
+        if send_all_before == Timestamp::MAX {
+            self.scrape_counters(current_timestamp());
+        }
         let mut range = self.metrics_data.split_off(&send_all_before);
         mem::swap(&mut range, &mut self.metrics_data);
 
@@ -719,15 +751,12 @@ struct CloudwatchStorage {
 }
 
 impl metrics_util::registry::Storage<Key> for CloudwatchStorage {
-    type Counter = Arc<RecorderHandleKey>;
+    type Counter = Arc<CounterCell>;
     type Gauge = Arc<RecorderHandleKey>;
     type Histogram = Arc<RecorderHandleKey>;
 
-    fn counter(&self, key: &Key) -> Self::Counter {
-        Arc::new(RecorderHandleKey {
-            key: key.clone(),
-            sender: self.sender.clone(),
-        })
+    fn counter(&self, _key: &Key) -> Self::Counter {
+        Arc::new(CounterCell::default())
     }
 
     fn gauge(&self, key: &Key) -> Self::Gauge {
@@ -747,7 +776,7 @@ impl metrics_util::registry::Storage<Key> for CloudwatchStorage {
 
 pub struct RecorderHandle {
     sender: mpsc::Sender<Datum>,
-    registry: metrics_util::registry::Registry<Key, CloudwatchStorage>,
+    registry: Arc<metrics_util::registry::Registry<Key, CloudwatchStorage>>,
 }
 
 impl RecorderHandle {
@@ -804,20 +833,6 @@ struct RecorderHandleKey {
 }
 
 impl RecorderHandleKey {
-    fn increment_counter(&self, value: u64) {
-        let _ = self.sender.try_send(Datum {
-            key: self.key.clone(),
-            value: Value::Counter(CounterValue::Increase(value)),
-        });
-    }
-
-    fn set_counter(&self, value: u64) {
-        let _ = self.sender.try_send(Datum {
-            key: self.key.clone(),
-            value: Value::Counter(CounterValue::Absolute(value)),
-        });
-    }
-
     fn increment_gauge(&self, value: f64) {
         let _ = self.sender.try_send(Datum {
             key: self.key.clone(),
@@ -849,13 +864,35 @@ impl RecorderHandleKey {
     }
 }
 
-impl CounterFn for RecorderHandleKey {
+/// Lock-free counter storage. `sum` is the window's delta for `increment` and
+/// the last set value for `absolute`; `dirty` keeps a zero-valued write visible.
+#[derive(Debug, Default)]
+struct CounterCell {
+    sum: std::sync::atomic::AtomicU64,
+    dirty: std::sync::atomic::AtomicBool,
+}
+
+impl CounterCell {
+    /// Take and reset the value. `None` if nothing was written since the last drain.
+    fn drain(&self) -> Option<u64> {
+        use std::sync::atomic::Ordering::AcqRel;
+        // `swap` so an increment racing the reset is carried over, not lost.
+        let sum = self.sum.swap(0, AcqRel);
+        let dirty = self.dirty.swap(false, AcqRel);
+        (sum != 0 || dirty).then_some(sum)
+    }
+}
+
+impl CounterFn for CounterCell {
     fn increment(&self, value: u64) {
-        self.increment_counter(value)
+        self.sum
+            .fetch_add(value, std::sync::atomic::Ordering::AcqRel);
+        self.dirty.store(true, std::sync::atomic::Ordering::Release);
     }
 
     fn absolute(&self, value: u64) {
-        self.set_counter(value);
+        self.sum.store(value, std::sync::atomic::Ordering::Release);
+        self.dirty.store(true, std::sync::atomic::Ordering::Release);
     }
 }
 
@@ -1009,15 +1046,22 @@ mod tests {
 
     #[test]
     fn should_override_default_dimensions() {
-        let collector = Collector::new(CollectorConfig {
-            default_dimensions: vec![
-                ("second".to_owned(), "123".to_owned()),
-                ("first".to_owned(), "initial-value".to_owned()),
-            ]
-            .into_iter()
-            .collect(),
-            storage_resolution: Resolution::Minute,
-        });
+        let (sender, _receiver) = mpsc::channel(1);
+        let registry = Arc::new(metrics_util::registry::Registry::new(CloudwatchStorage {
+            sender,
+        }));
+        let collector = Collector::new(
+            registry,
+            CollectorConfig {
+                default_dimensions: vec![
+                    ("second".to_owned(), "123".to_owned()),
+                    ("first".to_owned(), "initial-value".to_owned()),
+                ]
+                .into_iter()
+                .collect(),
+                storage_resolution: Resolution::Minute,
+            },
+        );
 
         let key = Key::from_parts(
             "my-metric",
@@ -1076,7 +1120,9 @@ mod tests {
         let (sender, _receiver) = mpsc::channel(1);
         let recorder = RecorderHandle {
             sender: sender.clone(),
-            registry: metrics_util::registry::Registry::new(CloudwatchStorage { sender }),
+            registry: Arc::new(metrics_util::registry::Registry::new(CloudwatchStorage {
+                sender,
+            })),
         };
         recorder
             .register_histogram(&Key::from_static_name("my_metric"))
