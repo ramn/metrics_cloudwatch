@@ -111,14 +111,8 @@ enum Value {
 }
 
 #[derive(Clone, Debug, Default)]
-pub struct Counter {
-    sample_count: u64,
-    sum: u64,
-}
-
-#[derive(Clone, Debug, Default)]
 struct Aggregate {
-    counter: Counter,
+    counter: Option<u64>,
     gauge: Option<Gauge>,
     histogram: HashMap<HistogramValue, Count>,
 }
@@ -561,9 +555,7 @@ impl Collector {
         let slot = get_timeslot(&mut self.metrics_data, &self.config, timestamp);
         self.registry.visit_counters(|key, cell| {
             if let Some(sum) = cell.drain() {
-                let counter = &mut slot.entry(key.clone()).or_default().counter;
-                counter.sample_count += 1;
-                counter.sum += sum;
+                *slot.entry(key.clone()).or_default().counter.get_or_insert(0) += sum;
             }
         });
     }
@@ -657,8 +649,8 @@ impl Collector {
                         .build()
                 };
 
-                if counter.sample_count > 0 {
-                    let sum = counter.sum as f64;
+                if let Some(sum) = counter {
+                    let sum = sum as f64;
                     let stats_set = StatisticSet::builder()
                         // We aren't interested in how many `counter!` calls we did so we put 1
                         // here to allow cloudwatch to display the average between this and any
