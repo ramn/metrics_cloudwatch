@@ -865,42 +865,42 @@ impl RecorderHandleKey {
     }
 }
 
-/// Lock-free counter storage. `sum` is the window's delta for `increment` and
-/// the last set value for `absolute`; `dirty` keeps a zero-valued write visible.
-/// Only zero-valued writes touch `dirty` (a non-zero write is visible via `sum`),
-/// so a non-zero write can't leak a stray `dirty` into the next window.
+/// Lock-free counter storage: the window's delta for `increment`, or the last
+/// set value for `absolute`. The top bit flags a zero-valued write so it stays
+/// visible; only zero-valued writes set it (a non-zero value is visible on its
+/// own). Values are thus limited to 63 bits: `absolute` saturates, and an
+/// `increment` sum past 2^63 within one window wraps.
 #[derive(Debug, Default)]
-struct CounterCell {
-    sum: std::sync::atomic::AtomicU64,
-    dirty: std::sync::atomic::AtomicBool,
-}
+struct CounterCell(std::sync::atomic::AtomicU64);
 
 impl CounterCell {
+    const WRITTEN: u64 = 1 << 63;
+
     /// Take and reset the value. `None` if nothing was written since the last drain.
     fn drain(&self) -> Option<u64> {
-        use std::sync::atomic::Ordering::Relaxed;
         // `swap` so an increment racing the reset is carried over, not lost.
-        let sum = self.sum.swap(0, Relaxed);
-        let dirty = self.dirty.swap(false, Relaxed);
-        (sum != 0 || dirty).then_some(sum)
+        let value = self.0.swap(0, std::sync::atomic::Ordering::Relaxed);
+        (value != 0).then_some(value & !Self::WRITTEN)
     }
 }
 
 impl CounterFn for CounterCell {
     fn increment(&self, value: u64) {
         if value == 0 {
-            self.dirty.store(true, std::sync::atomic::Ordering::Relaxed);
+            self.0
+                .fetch_or(Self::WRITTEN, std::sync::atomic::Ordering::Relaxed);
         } else {
-            self.sum
-                .fetch_add(value, std::sync::atomic::Ordering::Relaxed);
+            self.0.fetch_add(value, std::sync::atomic::Ordering::Relaxed);
         }
     }
 
     fn absolute(&self, value: u64) {
-        self.sum.store(value, std::sync::atomic::Ordering::Relaxed);
-        if value == 0 {
-            self.dirty.store(true, std::sync::atomic::Ordering::Relaxed);
-        }
+        let value = if value == 0 {
+            Self::WRITTEN
+        } else {
+            value.min(!Self::WRITTEN)
+        };
+        self.0.store(value, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -1135,5 +1135,220 @@ mod tests {
         recorder
             .register_histogram(&Key::from_static_name("my_metric"))
             .record(f64::NAN);
+    }
+
+    #[test]
+    fn counter_cell_drain() {
+        let cell = CounterCell::default();
+        assert_eq!(cell.drain(), None, "untouched");
+
+        cell.increment(0);
+        assert_eq!(cell.drain(), Some(0), "zero increment is visible");
+        assert_eq!(cell.drain(), None, "drain resets");
+
+        cell.increment(5);
+        cell.increment(0);
+        assert_eq!(cell.drain(), Some(5));
+        cell.increment(0);
+        cell.increment(5);
+        assert_eq!(cell.drain(), Some(5));
+
+        cell.absolute(0);
+        assert_eq!(cell.drain(), Some(0), "zero absolute is visible");
+        cell.absolute(7);
+        assert_eq!(cell.drain(), Some(7));
+        cell.absolute(0);
+        cell.increment(3);
+        assert_eq!(cell.drain(), Some(3));
+        cell.increment(3);
+        cell.absolute(0);
+        assert_eq!(cell.drain(), Some(0), "absolute overwrites");
+
+        cell.absolute((1 << 63) + 5);
+        assert_eq!(cell.drain(), Some(u64::MAX >> 1), "absolute saturates");
+    }
+
+    #[test]
+    fn counter_cell_concurrent_increments_not_lost() {
+        const THREADS: u64 = 4;
+        const INCREMENTS: u64 = 100_000;
+        let cell = CounterCell::default();
+        let done = std::sync::atomic::AtomicBool::new(false);
+        let mut total = 0;
+        std::thread::scope(|s| {
+            let writers: Vec<_> = (0..THREADS)
+                .map(|_| {
+                    s.spawn(|| {
+                        for i in 0..INCREMENTS {
+                            // Mix in zero writes to exercise the flag bit.
+                            cell.increment(i % 2);
+                        }
+                    })
+                })
+                .collect();
+            let drainer = s.spawn(|| {
+                let mut total = 0;
+                while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                    total += cell.drain().unwrap_or(0);
+                }
+                total
+            });
+            writers.into_iter().for_each(|w| w.join().unwrap());
+            done.store(true, std::sync::atomic::Ordering::Relaxed);
+            total = drainer.join().unwrap();
+        });
+        total += cell.drain().unwrap_or(0);
+        assert_eq!(total, THREADS * INCREMENTS / 2);
+    }
+
+    fn test_collector() -> Collector {
+        let (sender, _receiver) = mpsc::channel(1);
+        let registry = Arc::new(metrics_util::registry::Registry::new(CloudwatchStorage {
+            sender,
+        }));
+        Collector::new(
+            registry,
+            CollectorConfig {
+                default_dimensions: Default::default(),
+                storage_resolution: Resolution::Second,
+            },
+        )
+    }
+
+    fn counter(collector: &Collector, name: &'static str) -> metrics::Counter {
+        collector
+            .registry
+            .get_or_create_counter(&Key::from_static_name(name), |x| {
+                metrics::Counter::from_arc(x.clone())
+            })
+    }
+
+    /// Send everything before `send_all_before`, returning (name, timestamp secs, sum).
+    async fn send(collector: &mut Collector, send_all_before: Timestamp) -> Vec<(String, u64, f64)> {
+        let (emit_sender, mut emit_receiver) = mpsc::channel(1);
+        collector
+            .accept(Message::SendBatch {
+                send_all_before,
+                emit_sender,
+            })
+            .await;
+        let mut sent: Vec<_> = emit_receiver
+            .try_recv()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|m| {
+                (
+                    m.metric_name().unwrap().to_owned(),
+                    m.timestamp().unwrap().secs() as u64,
+                    m.statistic_values().map_or(f64::NAN, |s| s.sum().unwrap()),
+                )
+            })
+            .collect();
+        sent.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        sent
+    }
+
+    #[tokio::test]
+    async fn counters_are_emitted_per_scraped_window() {
+        let mut collector = test_collector();
+        let ones = counter(&collector, "ones");
+        let zero = counter(&collector, "zero");
+        let _untouched = counter(&collector, "untouched");
+
+        ones.increment(1);
+        ones.increment(1);
+        zero.increment(0);
+        collector.accept(Message::ScrapeCounters(100)).await;
+        ones.increment(3);
+        collector.accept(Message::ScrapeCounters(101)).await;
+        // Nothing written for this window: no datum.
+        collector.accept(Message::ScrapeCounters(102)).await;
+
+        assert_eq!(
+            send(&mut collector, 200).await,
+            vec![
+                ("ones".to_owned(), 100, 2.0),
+                ("ones".to_owned(), 101, 3.0),
+                ("zero".to_owned(), 100, 0.0),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn repeated_scrapes_into_one_window_sum() {
+        let mut collector = test_collector();
+        let c = counter(&collector, "c");
+        c.increment(2);
+        collector.accept(Message::ScrapeCounters(100)).await;
+        c.increment(0);
+        collector.accept(Message::ScrapeCounters(100)).await;
+        c.increment(3);
+        collector.accept(Message::ScrapeCounters(100)).await;
+        assert_eq!(send(&mut collector, 200).await, vec![("c".to_owned(), 100, 5.0)]);
+    }
+
+    #[tokio::test]
+    async fn windows_are_not_sent_before_scraped() {
+        let mut collector = test_collector();
+        let c = counter(&collector, "c");
+        c.increment(1);
+        collector.accept(Message::ScrapeCounters(100)).await;
+        // Lands in the current (real time) window, which hasn't been scraped.
+        collector
+            .accept(Message::Datum(Datum {
+                key: Key::from_static_name("g"),
+                value: Value::Gauge(GaugeValue::Absolute(1.0)),
+            }))
+            .await;
+        c.increment(4);
+
+        let now = current_timestamp();
+        assert_eq!(send(&mut collector, now + 10).await, vec![("c".to_owned(), 100, 1.0)]);
+
+        collector.accept(Message::ScrapeCounters(now)).await;
+        let sent = send(&mut collector, now + 10).await;
+        let names: Vec<_> = sent.iter().map(|(name, ..)| name.as_str()).collect();
+        assert_eq!(names, ["c", "g"]);
+        assert_eq!(sent[0].2, 4.0);
+    }
+
+    #[tokio::test]
+    async fn force_flush_scrapes_open_window() {
+        let mut collector = test_collector();
+        let c = counter(&collector, "c");
+        c.increment(7);
+        let sent = send(&mut collector, Timestamp::MAX).await;
+        assert_eq!(sent.len(), 1);
+        assert_eq!((sent[0].0.as_str(), sent[0].2), ("c", 7.0));
+        collector
+            .registry
+            .visit_counters(|_, cell| assert_eq!(cell.drain(), None, "flush drained the cell"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn scrape_timer_yields_each_closed_window_once() {
+        for resolution in [Resolution::Second, Resolution::Minute] {
+            let period = resolution.as_secs() as u64;
+            let start = current_timestamp();
+            let scrapes: Vec<_> = mk_scrape_timer(resolution)
+                .take(5)
+                .map(|m| match m {
+                    Message::ScrapeCounters(t) => t,
+                    _ => unreachable!(),
+                })
+                .collect()
+                .await;
+
+            // First scrape is for the window that is open now (or just closed).
+            assert!(scrapes[0] + 1 > start && scrapes[0] < start + period, "{scrapes:?}");
+            for (i, t) in scrapes.iter().enumerate() {
+                // `t` is the last second of its window, so `t + 1` is a boundary.
+                assert_eq!((t + 1) % period, 0, "{scrapes:?}");
+                assert_eq!(time_key(*t, resolution), t + 1 - period, "{scrapes:?}");
+                if i > 0 {
+                    assert_eq!(t - scrapes[i - 1], period, "consecutive windows: {scrapes:?}");
+                }
+            }
+        }
     }
 }
