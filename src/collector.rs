@@ -555,7 +555,11 @@ impl Collector {
         let slot = get_timeslot(&mut self.metrics_data, &self.config, timestamp);
         self.registry.visit_counters(|key, cell| {
             if let Some(sum) = cell.drain() {
-                *slot.entry(key.clone()).or_default().counter.get_or_insert(0) += sum;
+                *slot
+                    .entry(key.clone())
+                    .or_default()
+                    .counter
+                    .get_or_insert(0) += sum;
             }
         });
     }
@@ -890,7 +894,8 @@ impl CounterFn for CounterCell {
             self.0
                 .fetch_or(Self::WRITTEN, std::sync::atomic::Ordering::Relaxed);
         } else {
-            self.0.fetch_add(value, std::sync::atomic::Ordering::Relaxed);
+            self.0
+                .fetch_add(value, std::sync::atomic::Ordering::Relaxed);
         }
     }
 
@@ -1224,7 +1229,10 @@ mod tests {
     }
 
     /// Send everything before `send_all_before`, returning (name, timestamp secs, sum).
-    async fn send(collector: &mut Collector, send_all_before: Timestamp) -> Vec<(String, u64, f64)> {
+    async fn send(
+        collector: &mut Collector,
+        send_all_before: Timestamp,
+    ) -> Vec<(String, u64, f64)> {
         let (emit_sender, mut emit_receiver) = mpsc::channel(1);
         collector
             .accept(Message::SendBatch {
@@ -1284,7 +1292,10 @@ mod tests {
         collector.accept(Message::ScrapeCounters(100)).await;
         c.increment(3);
         collector.accept(Message::ScrapeCounters(100)).await;
-        assert_eq!(send(&mut collector, 200).await, vec![("c".to_owned(), 100, 5.0)]);
+        assert_eq!(
+            send(&mut collector, 200).await,
+            vec![("c".to_owned(), 100, 5.0)]
+        );
     }
 
     #[tokio::test]
@@ -1303,7 +1314,10 @@ mod tests {
         c.increment(4);
 
         let now = current_timestamp();
-        assert_eq!(send(&mut collector, now + 10).await, vec![("c".to_owned(), 100, 1.0)]);
+        assert_eq!(
+            send(&mut collector, now + 10).await,
+            vec![("c".to_owned(), 100, 1.0)]
+        );
 
         collector.accept(Message::ScrapeCounters(now)).await;
         let sent = send(&mut collector, now + 10).await;
@@ -1340,13 +1354,20 @@ mod tests {
                 .await;
 
             // First scrape is for the window that is open now (or just closed).
-            assert!(scrapes[0] + 1 > start && scrapes[0] < start + period, "{scrapes:?}");
+            assert!(
+                scrapes[0] + 1 > start && scrapes[0] < start + period,
+                "{scrapes:?}"
+            );
             for (i, t) in scrapes.iter().enumerate() {
                 // `t` is the last second of its window, so `t + 1` is a boundary.
                 assert_eq!((t + 1) % period, 0, "{scrapes:?}");
                 assert_eq!(time_key(*t, resolution), t + 1 - period, "{scrapes:?}");
                 if i > 0 {
-                    assert_eq!(t - scrapes[i - 1], period, "consecutive windows: {scrapes:?}");
+                    assert_eq!(
+                        t - scrapes[i - 1],
+                        period,
+                        "consecutive windows: {scrapes:?}"
+                    );
                 }
             }
         }
