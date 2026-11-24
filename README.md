@@ -87,3 +87,8 @@ The CloudWatch metrics API imposes some limitations.
 call. Going beyond this works but will incur one API call per batch of 150
 unique values. Could be a good idea to measure timing in milliseconds rather
 than nanoseconds, to keep down the number of unique values.
+
+Releasing
+---------
+
+See [RELEASING.md](RELEASING.md).
