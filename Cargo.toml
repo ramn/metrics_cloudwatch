@@ -7,7 +7,6 @@ edition = "2024"
 description = "CloudWatch emitter for the metrics crate"
 license = "MIT/Apache-2.0"
 documentation = "https://docs.rs/metrics_cloudwatch"
-homepage = "https://github.com/ramn/metrics_cloudwatch"
 repository = "https://github.com/ramn/metrics_cloudwatch"
 readme = "README.md"
 keywords = ["metrics", "cloudwatch", "aws"]
