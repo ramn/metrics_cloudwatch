@@ -1672,7 +1672,7 @@ dependencies = [
 
 [[package]]
 name = "metrics_cloudwatch"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "ahash",
  "anyhow",
